@@ -288,18 +288,33 @@ contextd being unavailable.`,
 }
 
 func buildShellInstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var sensitivity int
+
+	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install shell hooks for zsh and bash",
+		Long: `Install shell hooks that record commands to contextd.
+
+Sensitivity levels:
+  1 (L1, default) — command name only, e.g. "go" instead of "go build ./..."
+  2 (L2)          — full command string including arguments`,
+		Example: `  oc collector shell install
+  oc collector shell install --sensitivity 2`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return installShellHooks()
+			return installShellHooks(sensitivity)
 		},
 	}
+
+	cmd.Flags().IntVar(&sensitivity, "sensitivity", 1, "sensitivity level: 1=command name only, 2=full command with args")
+	return cmd
 }
 
 // ── shell helpers ─────────────────────────────────────────────────────────────
 
-func installShellHooks() error {
+func installShellHooks(sensitivity int) error {
+	if sensitivity < 1 || sensitivity > 2 {
+		sensitivity = 1
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -322,7 +337,8 @@ func installShellHooks() error {
 	}
 
 	zshHook := fmt.Sprintf(`# OpenContext shell hooks — installed by: oc collector shell install
-# Re-run install to update. oc binary: %s
+# Re-run install to update.
+# oc binary: %s  sensitivity: %d
 
 _oc_preexec() {
   _oc_cmd_start=$(date +%%s%%3N)
@@ -341,7 +357,8 @@ _oc_precmd() {
     --command "$_oc_cmd_input" \
     --exit-code "$_oc_exit" \
     --duration-ms "$_oc_dur" \
-    --cwd "$PWD" &>/dev/null &
+    --cwd "$PWD" \
+    --sensitivity %d &>/dev/null &
 
   _oc_cmd_input=""
 }
@@ -349,10 +366,10 @@ _oc_precmd() {
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _oc_preexec
 add-zsh-hook precmd _oc_precmd
-`, ocBin, ocBin)
+`, ocBin, sensitivity, ocBin, sensitivity)
 
 	bashHook := fmt.Sprintf(`# OpenContext shell hooks — installed by: oc collector shell install
-# oc binary: %s
+# oc binary: %s  sensitivity: %d
 
 _oc_preexec() {
   _oc_cmd_start=$(date +%%s%%3N 2>/dev/null || echo 0)
@@ -372,14 +389,15 @@ _oc_precmd() {
     --command "$_oc_cmd_input" \
     --exit-code "$_oc_exit" \
     --duration-ms "$_oc_dur" \
-    --cwd "$PWD" &>/dev/null &
+    --cwd "$PWD" \
+    --sensitivity %d &>/dev/null &
 
   _oc_cmd_input=""
 }
 
 trap '_oc_preexec "$BASH_COMMAND"' DEBUG
 PROMPT_COMMAND="_oc_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-`, ocBin, ocBin)
+`, ocBin, sensitivity, ocBin, sensitivity)
 
 	if err := os.WriteFile(hooksDir+"/hooks.zsh", []byte(zshHook), 0o644); err != nil {
 		return err
@@ -397,10 +415,17 @@ PROMPT_COMMAND="_oc_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 	sourceLine = "\n# OpenContext shell collector\nsource ~/.opencontext/collectors/shell/hooks.bash\n"
 	appendIfMissing(bashrc, sourceLine, "hooks.bash")
 
+	sensLabel := "L1 (command name only)"
+	if sensitivity == 2 {
+		sensLabel = "L2 (full command with args)"
+	}
+
 	fmt.Println("Shell hooks installed.")
-	fmt.Printf("  zsh:  source %s/hooks.zsh  (added to ~/.zshrc)\n", hooksDir)
-	fmt.Printf("  bash: source %s/hooks.bash (added to ~/.bashrc)\n", hooksDir)
+	fmt.Printf("  sensitivity: %s\n", sensLabel)
+	fmt.Printf("  zsh:  %s/hooks.zsh  (added to ~/.zshrc)\n", hooksDir)
+	fmt.Printf("  bash: %s/hooks.bash (added to ~/.bashrc)\n", hooksDir)
 	fmt.Println("\nRestart your shell or run: source ~/.zshrc")
+	fmt.Println("To change sensitivity, re-run: oc collector shell install --sensitivity 2")
 	return nil
 }
 
