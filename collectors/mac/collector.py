@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """macOS UI Activity Collector for OpenContext.
 
-Monitors user activity on macOS and pushes structured events to contextd:
+Monitors user activity on macOS and pushes structured events to the OpenContext daemon:
   - os.window_focus   — which app/window is in focus (+ URL for browsers)
   - os.browser_nav    — URL changes within a browser tab
   - os.ui_click       — UI element clicks (requires Accessibility permission)
@@ -15,7 +15,7 @@ Permissions required:
   (Screen Recording not needed unless you enable future OCR features)
 
 Usage:
-  python collector.py               # run in foreground, push to contextd
+  python collector.py               # run in foreground, push to OpenContext daemon
   python collector.py --debug       # verbose logging
   python collector.py --dry-run     # print JSON events, don't push
 """
@@ -30,7 +30,7 @@ import sys
 import time
 from queue import Empty, Queue
 
-from client import ContextdClient
+from client import OpenContextClient
 from config import Config
 from monitors.click_monitor import ClickMonitor
 from monitors.clipboard_monitor import ClipboardMonitor
@@ -53,11 +53,11 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     p.add_argument("--url", default=None, metavar="URL",
-                   help="contextd base URL (default: http://localhost:6060)")
+                   help="OpenContext daemon base URL (default: http://localhost:6060)")
     p.add_argument("--config", default=None, metavar="PATH",
                    help="path to YAML config file")
     p.add_argument("--dry-run", action="store_true",
-                   help="print events as JSON instead of pushing to contextd")
+                   help="print events as JSON instead of pushing to OpenContext daemon")
     p.add_argument("--debug", action="store_true",
                    help="enable debug-level logging")
     p.add_argument("--no-clicks", action="store_true", help="disable click monitoring")
@@ -83,17 +83,17 @@ def main() -> None:
 
     config = Config.load(args.config)
     if args.url:
-        config.contextd_url = args.url
+        config.daemon_url = args.url
 
-    client = ContextdClient(config.contextd_url)
+    client = OpenContextClient(config.daemon_url)
 
     if not args.dry_run:
         if client.is_alive():
-            logger.info("connected to contextd at %s", config.contextd_url)
+            logger.info("connected to OpenContext daemon at %s", config.daemon_url)
         else:
             logger.warning(
-                "contextd not reachable at %s — events will be dropped until it starts",
-                config.contextd_url,
+                "OpenContext daemon not reachable at %s — events will be dropped until it starts",
+                config.daemon_url,
             )
 
     event_queue: Queue = Queue()

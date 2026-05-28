@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # bridge.sh (runs on the Mac)
-# Tails /tmp/oc-mac-events.jsonl and POSTs each JSON line to contextd.
-# contextd must be reachable at CONTEXTD_URL (default: localhost:6060).
-# When used with the WSL2 setup, contextd is tunneled via SSH reverse-forward.
+# Tails /tmp/oc-mac-events.jsonl and POSTs each JSON line to the OpenContext daemon.
+# The daemon must be reachable at CONTEXTD_URL (default: localhost:6060).
+# When used with the WSL2 setup, the daemon is tunneled via SSH reverse-forward.
 #
 # Usage (run on Mac):
 #   bash bridge.sh
@@ -31,7 +31,7 @@ flush_batch() {
       -H "Content-Type: application/json" \
       -d "$payload" &>/dev/null \
       && log "flushed $n events" \
-      || log "flush failed (contextd down?)"
+      || log "flush failed (OpenContext daemon down?)"
   else
     local ok=0
     for ln in "${_lines[@]}"; do
@@ -50,10 +50,10 @@ until [[ -f "$EVENTS_FILE" ]]; do
   sleep 2
 done
 
-# Wait for contextd
+# Wait for OpenContext daemon
 curl -sf "$CONTEXTD_URL/api/v1/health" &>/dev/null \
-  && log "contextd OK at $CONTEXTD_URL" \
-  || log "WARNING: contextd not reachable at $CONTEXTD_URL — will retry"
+  && log "OpenContext daemon OK at $CONTEXTD_URL" \
+  || log "WARNING: OpenContext daemon not reachable at $CONTEXTD_URL — will retry"
 
 log "watching $EVENTS_FILE → $CONTEXTD_URL (poll every ${POLL_SECS}s)"
 

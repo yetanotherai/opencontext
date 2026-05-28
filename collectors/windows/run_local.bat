@@ -1,7 +1,7 @@
 @echo off
 :: run_local.bat — launcher for WSL2+Windows local dev setup.
 ::
-:: Instead of pushing directly to contextd (which lives inside WSL2 and
+:: Instead of pushing directly to the OpenContext daemon (which lives inside WSL2 and
 :: is not reachable from Windows), this runs the collector in --dry-run mode
 :: and appends JSON events to a shared file that the WSL2 bridge can read.
 ::

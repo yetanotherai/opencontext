@@ -16,8 +16,8 @@ DEFAULT_CONFIG_PATH = Path.home() / ".opencontext" / "mac-collector.yaml"
 
 @dataclass
 class Config:
-    # contextd endpoint
-    contextd_url: str = "http://localhost:6060"
+    # OpenContext daemon endpoint
+    daemon_url: str = "http://localhost:6060"
 
     # How often to flush buffered events (seconds)
     flush_interval: float = 5.0

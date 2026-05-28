@@ -1,6 +1,6 @@
 # Building a Collector for OpenContext
 
-A **Collector** is any process that observes user activity and pushes structured events to `contextd`. This guide covers everything you need to ship a production-quality collector — from a 10-line shell script to a full browser extension.
+A **Collector** is any process that observes user activity and pushes structured events to the OpenContext daemon (`oc daemon`). This guide covers everything you need to ship a production-quality collector — from a 10-line shell script to a full browser extension.
 
 ---
 
@@ -27,7 +27,7 @@ You don't need a Go project or SDK. Any HTTP client works. Here is a complete co
 
 ```bash
 #!/usr/bin/env bash
-# Minimal collector: push one event to contextd
+# Minimal collector: push one event to the OpenContext daemon
 
 curl -sf -X POST http://localhost:6060/api/v1/events \
   -H "Content-Type: application/json" \
@@ -48,7 +48,7 @@ curl -sf -X POST http://localhost:6060/api/v1/events \
   }" &>/dev/null &   # run non-blocking — never slow down the user
 ```
 
-That's it. `contextd` stores the event, and it will appear in `memory.md` the next time the scheduler runs.
+That's it. The OpenContext daemon stores the event, and it will appear in `memory.md` the next time the scheduler runs.
 
 ---
 
@@ -79,7 +79,7 @@ Every event is an `ActivityEvent` object. All fields are required unless noted.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `id` | string (UUIDv7) | No | Assigned by `contextd` on ingest if omitted |
+| `id` | string (UUIDv7) | No | Assigned by the daemon on ingest if omitted |
 | `ts` | int64 | **Yes** | Unix milliseconds **when the activity occurred**, not when pushed |
 | `source` | string | **Yes** | Tool family: `shell`, `git`, `browser`, `ide`, `claude`, or a custom string |
 | `type` | string | **Yes** | Specific activity within the source |
@@ -104,7 +104,7 @@ Every event is an `ActivityEvent` object. All fields are required unless noted.
 
 ## 3. API Reference
 
-`contextd` listens on `http://localhost:6060` by default (configurable in `~/.opencontext/config.yaml`).
+`oc daemon` listens on `http://localhost:6060` by default (configurable in `~/.opencontext/config.yaml`).
 
 ### POST /api/v1/events — push a single event
 
@@ -174,7 +174,7 @@ GET /api/v1/health
 }
 ```
 
-Use this to detect whether `contextd` is running before attempting to push.
+Use this to detect whether the daemon is running before attempting to push.
 
 ### GET /api/v1/events — query events (for debugging)
 
@@ -193,7 +193,7 @@ GET /api/v1/events?source=shell&project=opencontext&since=1h&limit=20
 
 ## 4. Sensitivity Levels
 
-Every event must declare a sensitivity level. `contextd` drops events that exceed the user's configured `max_sensitivity`.
+Every event must declare a sensitivity level. The daemon drops events that exceed the user's configured `max_sensitivity`.
 
 | Level | Value | What to store | Examples |
 |-------|-------|---------------|---------|
@@ -309,7 +309,7 @@ def push_page_visit(url: str, title: str, domain: str, duration_ms: int):
         resp.raise_for_status()
         return resp.json()["id"]
     except Exception:
-        pass  # contextd unavailable — never crash the caller
+        pass  # daemon unavailable — never crash the caller
 
 
 def push_batch(events: list[dict]):
@@ -326,7 +326,7 @@ def push_batch(events: list[dict]):
         pass
 
 
-def contextd_running() -> bool:
+def opencontext_running() -> bool:
     """Quick liveness check before buffering events."""
     try:
         requests.get(f"{CONTEXTD_URL}/api/v1/health", timeout=1).raise_for_status()
@@ -339,7 +339,7 @@ def contextd_running() -> bool:
 
 ```typescript
 // opencontext-client.ts
-// Minimal TypeScript client for pushing events to contextd.
+// Minimal TypeScript client for pushing events to the OpenContext daemon.
 
 const CONTEXTD_URL = process.env.OPENCONTEXT_URL ?? "http://localhost:6060";
 
@@ -364,7 +364,7 @@ async function pushEvent(event: ActivityEvent): Promise<string | null> {
     const { id } = await res.json();
     return id;
   } catch {
-    return null; // contextd unavailable — fail silently
+    return null; // daemon unavailable — fail silently
   }
 }
 
@@ -436,7 +436,7 @@ func main() {
     ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
     defer cancel()
 
-    _, _ = c.Push(ctx, e) // errors silently dropped — contextd may be offline
+    _, _ = c.Push(ctx, e) // errors silently dropped — daemon may be offline
 }
 ```
 
@@ -483,21 +483,21 @@ Claude Code will POST a body like:
 }
 ```
 
-`contextd` derives the project name from `cwd` by walking up to find `.git`, then stores the event as `claude.user_message`. Timestamps use `time.Now()` since the hook fires at the moment of submission.
+The daemon derives the project name from `cwd` by walking up to find `.git`, then stores the event as `claude.user_message`. Timestamps use `time.Now()` since the hook fires at the moment of submission.
 
 ### Adapting this pattern for other AI tools
 
-Any AI coding tool with a webhook/hook system can integrate the same way. Create a new route handler in `internal/ingester/` that:
+Any AI coding tool with a webhook/hook system can integrate the same way. Create a new adapter in `internal/adapters/` that:
 
 1. Parses the tool's native payload
 2. Converts it to an `ActivityEvent`
-3. Enqueues it via `ing.queue`
+3. Dispatches the event through the ingester's generic `DispatchEvent` callback
 
 ---
 
 ## 8. Client-Side Pre-filtering
 
-**Filter before sending, not after.** If `contextd` receives an event it will drop (due to sensitivity policy or exclude patterns), you've wasted a round-trip HTTP call and a debug log line.
+**Filter before sending, not after.** If the daemon receives an event it will drop (due to sensitivity policy or exclude patterns), you've wasted a round-trip HTTP call and a debug log line.
 
 ### Shell hook pattern
 
@@ -603,8 +603,8 @@ A `POST /api/v1/schemas` endpoint is planned for collectors that are not written
 ## 11. Testing Your Collector
 
 ```bash
-# 1. Start contextd with debug logging so you see every event
-contextd --log-level debug
+# 1. Start the daemon with debug logging so you see every event
+oc daemon --log-level debug
 
 # 2. Push a test event from your collector
 curl -sf -X POST http://localhost:6060/api/v1/events \
@@ -630,14 +630,14 @@ curl -X POST http://localhost:6060/api/v1/compile \
 cat ~/.opencontext/memory.md
 ```
 
-### Simulate contextd being unavailable
+### Simulate the daemon being unavailable
 
 ```bash
-# Stop contextd, push events, verify your collector doesn't crash or block
-pkill contextd
+# Stop the daemon, push events, verify your collector doesn't crash or block
+pkill oc
 your-collector-push-command   # must exit cleanly within 2s
-# Restart contextd — events pushed while offline are lost (expected for fire-and-forget collectors)
-contextd &
+# Restart the daemon — events pushed while offline are lost (expected for fire-and-forget collectors)
+oc daemon &
 ```
 
 ---
@@ -658,8 +658,8 @@ Before publishing your collector, verify:
 - [ ] Credentials, tokens, and secrets are never captured in any payload field
 
 **Resilience**
-- [ ] Collector never blocks user workflow waiting for `contextd` (2s timeout max)
-- [ ] Collector handles `contextd` being down gracefully (drop silently or buffer locally)
+- [ ] Collector never blocks user workflow waiting for the daemon (2s timeout max)
+- [ ] Collector handles the daemon being down gracefully (drop silently or buffer locally)
 - [ ] Client-side pre-filtering mirrors the server's exclude patterns
 
 **UX**

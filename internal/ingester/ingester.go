@@ -67,6 +67,24 @@ func (ing *Ingester) Mount(r chi.Router) {
 	r.Post("/api/v1/events/batch", ing.handleBatch)
 }
 
+// DispatchEvent filters and queues an event produced by an adapter.
+func (ing *Ingester) DispatchEvent(w http.ResponseWriter, e *event.ActivityEvent) {
+	if e == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "skipped"})
+		return
+	}
+	if !ing.filter.Allow(e) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "filtered"})
+		return
+	}
+	select {
+	case ing.queue <- e:
+	default:
+		ing.log.Warn("event queue full, dropping adapter event")
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted", "id": e.ID})
+}
+
 // handleSingle handles POST /api/v1/events.
 func (ing *Ingester) handleSingle(w http.ResponseWriter, r *http.Request) {
 	var e event.ActivityEvent

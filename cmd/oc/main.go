@@ -1,23 +1,26 @@
-// oc is the OpenContext CLI. It communicates with contextd over HTTP and also
+// oc is the OpenContext CLI. It communicates with the OpenContext daemon over HTTP and also
 // exposes collector subcommands used by shell hooks.
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	claudecollector "github.com/yetanotherai/opencontext/collectors/claude"
+	"github.com/yetanotherai/opencontext/internal/daemon"
+	"github.com/yetanotherai/opencontext/internal/installers"
+	"github.com/yetanotherai/opencontext/internal/registry"
+	"github.com/yetanotherai/opencontext/internal/service"
 	"github.com/yetanotherai/opencontext/pkg/client"
 	"github.com/yetanotherai/opencontext/pkg/event"
 )
@@ -25,6 +28,7 @@ import (
 var (
 	daemonURL string
 	jsonOut   bool
+	version   = "0.1.0"
 )
 
 func main() {
@@ -36,21 +40,24 @@ func main() {
 
 func buildRoot() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "oc",
-		Short: "OpenContext CLI — inspect events, trigger compiles, manage collectors",
+		Use:     "oc",
+		Version: version,
+		Short:   "OpenContext CLI — inspect events, trigger compiles, manage collectors",
 		Long: `oc is the command-line interface for OpenContext.
 
 Environment variables:
-  OC_DAEMON_URL    contextd base URL (default: http://localhost:6060)`,
+  OC_DAEMON_URL    OpenContext daemon base URL (default: http://localhost:6060)`,
 	}
 
-	root.PersistentFlags().StringVar(&daemonURL, "daemon", envOrDefault("OC_DAEMON_URL", "http://localhost:6060"), "contextd base URL")
+	root.PersistentFlags().StringVar(&daemonURL, "daemon", envOrDefault("OC_DAEMON_URL", "http://localhost:6060"), "OpenContext daemon base URL")
 	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "output as JSON")
 
 	root.AddCommand(
+		buildDaemonCmd(),
 		buildStatusCmd(),
 		buildEventsCmd(),
 		buildCompileCmd(),
+		buildCollectorsCmd(),
 		buildCollectorCmd(),
 		buildInjectCmd(),
 	)
@@ -58,12 +65,339 @@ Environment variables:
 	return root
 }
 
+// ── oc collectors ────────────────────────────────────────────────────────────
+
+func buildCollectorsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "collectors",
+		Short: "List collector integrations and event schemas",
+	}
+	cmd.AddCommand(buildCollectorsListCmd())
+	cmd.AddCommand(buildCollectorsInfoCmd())
+	cmd.AddCommand(buildCollectorsSchemasCmd())
+	return cmd
+}
+
+func buildCollectorsListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List known collector integrations",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			collectors := registry.AllCollectors()
+			if jsonOut {
+				return printJSON(withResolvedCollectorVersions(collectors))
+			}
+			fmt.Printf("%-12s %-18s %-16s %-20s %s\n", "NAME", "KIND", "VERSION", "SOURCES", "INSTALL")
+			for _, c := range collectors {
+				fmt.Printf("%-12s %-18s %-16s %-20s %s\n",
+					c.Name,
+					c.Kind,
+					resolveCollectorVersion(c.Version),
+					strings.Join(c.Sources, ","),
+					strings.Join(c.Install, " && "),
+				)
+			}
+			return nil
+		},
+	}
+}
+
+func buildCollectorsInfoCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "info <name>",
+		Short: "Show collector integration details",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, ok := registry.LookupCollector(args[0])
+			if !ok {
+				return fmt.Errorf("unknown collector %q", args[0])
+			}
+			c.Version = resolveCollectorVersion(c.Version)
+			if jsonOut {
+				return printJSON(c)
+			}
+			fmt.Printf("name:        %s\n", c.Name)
+			fmt.Printf("display:     %s\n", c.DisplayName)
+			fmt.Printf("version:     %s\n", c.Version)
+			fmt.Printf("kind:        %s\n", c.Kind)
+			fmt.Printf("platforms:   %s\n", strings.Join(c.Platforms, ", "))
+			fmt.Printf("sources:     %s\n", strings.Join(c.Sources, ", "))
+			fmt.Printf("description: %s\n", c.Description)
+			if len(c.Install) > 0 {
+				fmt.Println("install:")
+				for _, install := range c.Install {
+					fmt.Printf("  %s\n", install)
+				}
+			}
+			if c.Docs != "" {
+				fmt.Printf("docs:        %s\n", c.Docs)
+			}
+			if len(c.Schemas) > 0 {
+				fmt.Println("schemas:")
+				for _, s := range c.Schemas {
+					fmt.Printf("  %s.%s\n", s.Source, s.Type)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func buildCollectorsSchemasCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "schemas",
+		Short: "List registered event schemas",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			schemas := event.AllSchemas()
+			sortSchemas(schemas)
+			if jsonOut {
+				return printJSON(schemas)
+			}
+			fmt.Printf("%-24s %s\n", "EVENT", "DESCRIPTION")
+			for _, s := range schemas {
+				fmt.Printf("%-24s %s\n", fmt.Sprintf("%s.%s", s.Source, s.Type), s.Description)
+			}
+			return nil
+		},
+	}
+}
+
+// ── oc daemon ────────────────────────────────────────────────────────────────
+
+func buildDaemonCmd() *cobra.Command {
+	var cfgFile string
+	var logLevel string
+
+	cmd := &cobra.Command{
+		Use:     "daemon",
+		Aliases: []string{"start", "serve"},
+		Short:   "Run the OpenContext local daemon",
+		Example: `  oc daemon
+  oc daemon --log-level debug
+  oc start`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonForeground(cfgFile, logLevel)
+		},
+	}
+
+	cmd.Flags().StringVar(&cfgFile, "config", "", "config file (default: ~/.opencontext/config.yaml)")
+	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug|info|warn|error")
+	cmd.AddCommand(buildDaemonRunCmd())
+	cmd.AddCommand(buildDaemonInstallCmd())
+	cmd.AddCommand(buildDaemonUninstallCmd())
+	cmd.AddCommand(buildDaemonServiceCmd("start", "Start the installed daemon service", func(m service.Manager) error { return m.Start() }))
+	cmd.AddCommand(buildDaemonServiceCmd("stop", "Stop the installed daemon service", func(m service.Manager) error { return m.Stop() }))
+	cmd.AddCommand(buildDaemonServiceCmd("restart", "Restart the installed daemon service", func(m service.Manager) error { return m.Restart() }))
+	cmd.AddCommand(buildDaemonStatusCmd())
+	cmd.AddCommand(buildDaemonLogsCmd())
+	return cmd
+}
+
+func runDaemonForeground(cfgFile, logLevel string) error {
+	return daemon.Run(daemon.Options{
+		ConfigFile: cfgFile,
+		LogLevel:   logLevel,
+		Version:    version,
+	})
+}
+
+func buildDaemonRunCmd() *cobra.Command {
+	var cfgFile string
+	var logLevel string
+	cmd := &cobra.Command{
+		Use:    "run",
+		Short:  "Run the daemon in the foreground",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonForeground(cfgFile, logLevel)
+		},
+	}
+	cmd.Flags().StringVar(&cfgFile, "config", "", "config file (default: ~/.opencontext/config.yaml)")
+	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug|info|warn|error")
+	return cmd
+}
+
+func buildDaemonInstallCmd() *cobra.Command {
+	var cfg service.Config
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install and start OpenContext as a background service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := service.Resolve(&cfg); err != nil {
+				return err
+			}
+			mgr, err := service.NewManager()
+			if err != nil {
+				return err
+			}
+			if st, _ := mgr.Status(); st != nil && st.Installed && !force {
+				return fmt.Errorf("daemon service already installed; use --force to reinstall")
+			}
+			if force {
+				_ = mgr.Uninstall()
+			}
+			if err := mgr.Install(cfg); err != nil {
+				return err
+			}
+			if err := service.SaveMeta(&service.Meta{
+				LogFile:     cfg.LogFile,
+				LogMaxSize:  cfg.LogMaxSize,
+				WorkDir:     cfg.WorkDir,
+				ConfigFile:  cfg.ConfigFile,
+				BinaryPath:  cfg.BinaryPath,
+				Platform:    mgr.Platform(),
+				InstalledAt: service.NowISO(),
+			}); err != nil {
+				return fmt.Errorf("save daemon metadata: %w", err)
+			}
+			fmt.Println("OpenContext daemon installed and started.")
+			fmt.Printf("  platform: %s\n", mgr.Platform())
+			fmt.Printf("  binary:   %s\n", cfg.BinaryPath)
+			fmt.Printf("  workdir:  %s\n", cfg.WorkDir)
+			fmt.Printf("  log:      %s\n", cfg.LogFile)
+			if strings.Contains(mgr.Platform(), "user") {
+				if enabled, user := service.CheckLinger(); !enabled {
+					fmt.Printf("\nWarning: user service may stop after logout. To keep it alive, run: sudo loginctl enable-linger %s\n", user)
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&cfg.ConfigFile, "config", "", "OpenContext config file (default: ~/.opencontext/config.yaml)")
+	cmd.Flags().StringVar(&cfg.WorkDir, "work-dir", "", "working directory (default: current directory)")
+	cmd.Flags().StringVar(&cfg.LogFile, "log-file", "", "log file path (default: ~/.opencontext/logs/oc.log)")
+	cmd.Flags().Int64Var(&cfg.LogMaxSize, "log-max-size", 10, "max log size in MB")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing service installation")
+	cmd.PreRun = func(cmd *cobra.Command, args []string) {
+		cfg.LogMaxSize *= 1024 * 1024
+	}
+	return cmd
+}
+
+func buildDaemonUninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove the installed daemon service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := service.NewManager()
+			if err != nil {
+				return err
+			}
+			if err := mgr.Uninstall(); err != nil {
+				return err
+			}
+			service.RemoveMeta()
+			fmt.Println("OpenContext daemon uninstalled.")
+			return nil
+		},
+	}
+}
+
+func buildDaemonServiceCmd(use, short string, action func(service.Manager) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := service.NewManager()
+			if err != nil {
+				return err
+			}
+			if err := requireServiceInstalled(mgr); err != nil {
+				return err
+			}
+			if err := action(mgr); err != nil {
+				return err
+			}
+			past := map[string]string{"start": "started", "stop": "stopped", "restart": "restarted"}[use]
+			fmt.Printf("OpenContext daemon %s.\n", past)
+			return nil
+		},
+	}
+}
+
+func buildDaemonStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show background daemon service status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := service.NewManager()
+			if err != nil {
+				return err
+			}
+			st, err := mgr.Status()
+			if err != nil {
+				return err
+			}
+			state := "stopped"
+			if st.Running {
+				state = "running"
+			}
+			if !st.Installed {
+				state = "not installed"
+			}
+			fmt.Println("OpenContext daemon service")
+			fmt.Printf("  status:   %s\n", state)
+			fmt.Printf("  platform: %s\n", st.Platform)
+			if st.PID > 0 {
+				fmt.Printf("  pid:      %d\n", st.PID)
+			}
+			if meta, err := service.LoadMeta(); err == nil {
+				fmt.Printf("  log:      %s\n", meta.LogFile)
+				fmt.Printf("  workdir:  %s\n", meta.WorkDir)
+			}
+			return nil
+		},
+	}
+}
+
+func buildDaemonLogsCmd() *cobra.Command {
+	var follow bool
+	var lines int
+	var logFile string
+	cmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Show daemon log output",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if logFile == "" {
+				if meta, err := service.LoadMeta(); err == nil && meta.LogFile != "" {
+					logFile = meta.LogFile
+				} else {
+					logFile = service.DefaultLogFile()
+				}
+			}
+			if err := printLastLines(logFile, lines); err != nil {
+				return err
+			}
+			if follow {
+				return followFile(logFile)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "follow log output")
+	cmd.Flags().IntVarP(&lines, "lines", "n", 100, "number of lines to show")
+	cmd.Flags().StringVar(&logFile, "log-file", "", "custom log file path")
+	return cmd
+}
+
+func requireServiceInstalled(mgr service.Manager) error {
+	st, err := mgr.Status()
+	if err != nil {
+		return err
+	}
+	if st == nil || !st.Installed {
+		return fmt.Errorf("daemon service is not installed; run: oc daemon install")
+	}
+	return nil
+}
+
 // ── oc status ─────────────────────────────────────────────────────────────────
 
 func buildStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show contextd daemon health and statistics",
+		Short: "Show OpenContext daemon health and statistics",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := client.New(daemonURL)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -71,14 +405,14 @@ func buildStatusCmd() *cobra.Command {
 
 			health, err := c.Health(ctx)
 			if err != nil {
-				return fmt.Errorf("contextd unreachable at %s: %w\n\nStart the daemon with: contextd", daemonURL, err)
+				return fmt.Errorf("OpenContext daemon unreachable at %s: %w\n\nStart it with: oc daemon", daemonURL, err)
 			}
 
 			if jsonOut {
 				return printJSON(health)
 			}
 
-			fmt.Printf("contextd status: %s\n", health["status"])
+			fmt.Printf("daemon status:   %s\n", health["status"])
 			fmt.Printf("version:         %s\n", health["version"])
 			fmt.Printf("uptime:          %ss\n", formatNum(health["uptime_seconds"]))
 			fmt.Printf("events stored:   %s\n", formatNum(health["events_stored"]))
@@ -260,10 +594,10 @@ func buildShellPushCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "push",
-		Short: "Push a shell command event to contextd",
+		Short: "Push a shell command event to the OpenContext daemon",
 		Long: `Push is called by shell hook scripts (zsh preexec/precmd) to record
 a command execution event. It runs non-blocking and silently ignores
-contextd being unavailable.`,
+the OpenContext daemon being unavailable.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if command == "" {
 				return nil // empty commands are silently dropped
@@ -332,7 +666,7 @@ func buildShellInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install shell hooks for zsh and bash",
-		Long: `Install shell hooks that record commands to contextd.
+		Long: `Install shell hooks that record commands to the OpenContext daemon.
 
 Sensitivity levels:
   1 (L1) — command name only, e.g. "go" instead of "go build ./..."
@@ -340,7 +674,7 @@ Sensitivity levels:
 		Example: `  oc collector shell install
   oc collector shell install --sensitivity 2`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return installShellHooks(sensitivity)
+			return installers.InstallShell(sensitivity)
 		},
 	}
 
@@ -353,118 +687,27 @@ Sensitivity levels:
 func buildClaudeCollectorCmd() *cobra.Command {
 	claude := &cobra.Command{
 		Use:   "claude",
-		Short: "Claude Code session collector commands",
+		Short: "Claude Code hook collector commands",
 	}
-	claude.AddCommand(buildClaudeStartCmd())
 	claude.AddCommand(buildClaudeInstallCmd())
 	return claude
 }
 
-func buildClaudeStartCmd() *cobra.Command {
-	var (
-		projectsDir string
-		pollSecs    int
-		sensitivity int
-		verbose     bool
-	)
-
-	cmd := &cobra.Command{
-		Use:   "start",
-		Short: "Start watching Claude Code sessions and push user messages to contextd",
-		Long: `Watches ~/.claude/projects/**/*.jsonl for new user messages and pushes
-them as events to contextd. Runs in the foreground; use 'install' to
-auto-start on shell launch.
-
-Sensitivity levels:
-  1 (L1) — message length only (no message text stored)
-  2 (L2, default) — full message text stored`,
-		Example: `  oc collector claude start
-  oc collector claude start --sensitivity 2 --poll 5`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			logLevel := slog.LevelInfo
-			if verbose {
-				logLevel = slog.LevelDebug
-			}
-			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
-
-			cfg := claudecollector.DefaultConfig()
-			cfg.DaemonURL = daemonURL
-			cfg.Sensitivity = event.SensitivityLevel(sensitivity)
-			cfg.PollInterval = time.Duration(pollSecs) * time.Second
-			if projectsDir != "" {
-				cfg.ClaudeProjectsDir = projectsDir
-			}
-
-			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-			defer stop()
-
-			return claudecollector.New(cfg, log).Run(ctx)
-		},
-	}
-
-	cmd.Flags().StringVar(&projectsDir, "projects-dir", "", "Claude Code projects directory (default: ~/.claude/projects)")
-	cmd.Flags().IntVar(&pollSecs, "poll", 3, "poll interval in seconds")
-	cmd.Flags().IntVar(&sensitivity, "sensitivity", 2, "sensitivity level: 1=length only, 2=full message text")
-	cmd.Flags().BoolVar(&verbose, "verbose", false, "verbose debug logging")
-
-	return cmd
-}
-
 func buildClaudeInstallCmd() *cobra.Command {
-	var sensitivity int
+	var daemonAddr string
 
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Auto-start Claude Code collector on shell launch",
-		Long: `Adds a background launch of 'oc collector claude start' to ~/.zshrc.
-Uses a PID file to prevent duplicate processes.`,
+		Short: "Install OpenContext HTTP hooks into Claude Code",
+		Long: `Adds UserPromptSubmit and SessionStart HTTP hooks to Claude Code.
+Claude Code will POST each user message to the OpenContext daemon for recording.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return installClaudeHooks(sensitivity)
+			return installers.InstallClaude(daemonAddr)
 		},
 	}
 
-	cmd.Flags().IntVar(&sensitivity, "sensitivity", 2, "sensitivity level: 1=length only, 2=full message text")
+	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://localhost:6060", "OpenContext daemon base URL")
 	return cmd
-}
-
-func installClaudeHooks(sensitivity int) error {
-	ocBin, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve oc binary path: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(ocBin); err == nil {
-		ocBin = resolved
-	}
-
-	home, _ := os.UserHomeDir()
-	pidFile := filepath.Join(home, ".opencontext", "collectors", "claude", "collector.pid")
-
-	// Shell snippet: start the collector only if not already running.
-	snippet := fmt.Sprintf(`
-# OpenContext — Claude Code collector (auto-start)
-_oc_claude_start() {
-  local pidfile=%s
-  if [[ -f "$pidfile" ]]; then
-    local pid
-    pid=$(cat "$pidfile")
-    kill -0 "$pid" 2>/dev/null && return  # already running
-  fi
-  mkdir -p "$(dirname "$pidfile")"
-  %s collector claude start --sensitivity %d &>/dev/null &
-  echo $! > "$pidfile"
-}
-_oc_claude_start
-`, pidFile, ocBin, sensitivity)
-
-	zshrc := filepath.Join(home, ".zshrc")
-	appendIfMissing(zshrc, snippet, "oc_claude_start")
-
-	fmt.Println("Claude Code collector auto-start installed.")
-	fmt.Printf("  sensitivity: L%d\n", sensitivity)
-	fmt.Printf("  pid file:    %s\n", pidFile)
-	fmt.Println("\nRestart your shell or run:")
-	fmt.Printf("  %s collector claude start --sensitivity %d &\n", ocBin, sensitivity)
-	return nil
 }
 
 // ── Codex CLI collector ───────────────────────────────────────────────────────
@@ -485,103 +728,15 @@ func buildCodexInstallCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Install OpenContext hooks into Codex CLI (~/.codex/config.json)",
 		Long: `Adds UserPromptSubmit and SessionStart HTTP hooks to Codex CLI.
-Codex will POST each user message to contextd for recording.
+Codex will POST each user message to the OpenContext daemon for recording.
 
 Requires Codex CLI with hooks support (codex >= 0.1.x).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return installCodexHooks(daemonAddr)
+			return installers.InstallCodex(daemonAddr)
 		},
 	}
-	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://localhost:6060", "contextd base URL")
+	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://localhost:6060", "OpenContext daemon base URL")
 	return cmd
-}
-
-func installCodexHooks(daemonAddr string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	hooksDir := filepath.Join(home, ".opencontext", "collectors", "hooks")
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return err
-	}
-
-	// Shell adapter script: reads JSON from stdin, POSTs to contextd async.
-	scriptPath := filepath.Join(hooksDir, "codex.sh")
-	script := fmt.Sprintf(`#!/usr/bin/env bash
-# OpenContext hook adapter for Codex CLI — auto-generated by: oc collector codex install
-INPUT=$(cat)
-curl -sf -X POST %s/api/v1/hooks/codex \
-  -H "Content-Type: application/json" \
-  --data-raw "$INPUT" >/dev/null 2>&1 &
-exit 0
-`, daemonAddr)
-
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		return fmt.Errorf("write hook script: %w", err)
-	}
-
-	// Codex CLI hooks: ~/.codex/hooks.json (top-level event keys, no "hooks" wrapper)
-	codexCfgDir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(codexCfgDir, 0o755); err != nil {
-		return err
-	}
-	codexHooksPath := filepath.Join(codexCfgDir, "hooks.json")
-
-	cfgJSON, err := patchCodexHooks(codexHooksPath, scriptPath)
-	if err != nil {
-		return fmt.Errorf("patch codex hooks: %w", err)
-	}
-	if err := os.WriteFile(codexHooksPath, cfgJSON, 0o644); err != nil {
-		return fmt.Errorf("write codex hooks: %w", err)
-	}
-
-	fmt.Println("Codex CLI hooks installed.")
-	fmt.Printf("  hook script:  %s\n", scriptPath)
-	fmt.Printf("  codex hooks:  %s\n", codexHooksPath)
-	fmt.Printf("  endpoint:     %s/api/v1/hooks/codex\n", daemonAddr)
-	fmt.Println("\nStart contextd, then open a Codex session. Messages will be recorded.")
-	fmt.Println("Note: Codex may prompt you to trust the hook on first run (/hooks to review).")
-	return nil
-}
-
-// patchCodexHooks reads (or creates) ~/.codex/hooks.json.
-// Codex hooks.json has events as TOP-LEVEL keys (no "hooks" wrapper).
-// Each event maps to an array of matcher-group objects: [{matcher?, hooks: [{type, command}]}]
-func patchCodexHooks(cfgPath, scriptPath string) ([]byte, error) {
-	// Read existing hooks.json or start fresh.
-	existing := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(cfgPath); err == nil {
-		_ = json.Unmarshal(data, &existing)
-	}
-
-	// Each entry: {"hooks": [{"type": "command", "command": "/path/to/script"}]}
-	ocEntry := map[string]any{
-		"hooks": []map[string]string{{"type": "command", "command": scriptPath}},
-	}
-	entryJSON, _ := json.Marshal(ocEntry)
-
-	for _, eventName := range []string{"UserPromptSubmit", "SessionStart"} {
-		existing[eventName] = prependJSONEntry(existing[eventName], entryJSON, scriptPath)
-	}
-
-	return json.MarshalIndent(existing, "", "  ")
-}
-
-// prependJSONEntry removes array entries containing scriptPath and prepends a fresh entry.
-func prependJSONEntry(existing json.RawMessage, entry json.RawMessage, dedupKey string) json.RawMessage {
-	var items []json.RawMessage
-	if existing != nil {
-		_ = json.Unmarshal(existing, &items)
-	}
-	filtered := []json.RawMessage{entry}
-	for _, item := range items {
-		if !containsStr(string(item), dedupKey) {
-			filtered = append(filtered, item)
-		}
-	}
-	out, _ := json.Marshal(filtered)
-	return out
 }
 
 // ── Cursor IDE collector ──────────────────────────────────────────────────────
@@ -606,97 +761,11 @@ Cursor will execute the hook script on each user prompt submission.
 
 Requires Cursor IDE with hooks support (Cursor >= 1.0).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return installCursorHooks(daemonAddr)
+			return installers.InstallCursor(daemonAddr)
 		},
 	}
-	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://localhost:6060", "contextd base URL")
+	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://localhost:6060", "OpenContext daemon base URL")
 	return cmd
-}
-
-func installCursorHooks(daemonAddr string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	// Create hook script in ~/.cursor/hooks/ (Cursor user hook working dir)
-	cursorHooksDir := filepath.Join(home, ".cursor", "hooks")
-	if err := os.MkdirAll(cursorHooksDir, 0o755); err != nil {
-		return err
-	}
-
-	scriptPath := filepath.Join(cursorHooksDir, "oc-capture.sh")
-	script := fmt.Sprintf(`#!/usr/bin/env bash
-# OpenContext hook adapter for Cursor IDE — auto-generated by: oc collector cursor install
-INPUT=$(cat)
-curl -sf -X POST %s/api/v1/hooks/cursor \
-  -H "Content-Type: application/json" \
-  --data-raw "$INPUT" >/dev/null 2>&1 &
-exit 0
-`, daemonAddr)
-
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		return fmt.Errorf("write hook script: %w", err)
-	}
-
-	// Patch ~/.cursor/hooks.json
-	cursorCfgPath := filepath.Join(home, ".cursor", "hooks.json")
-	cfgJSON, err := patchCursorHooks(cursorCfgPath)
-	if err != nil {
-		return fmt.Errorf("patch cursor hooks: %w", err)
-	}
-	if err := os.WriteFile(cursorCfgPath, cfgJSON, 0o644); err != nil {
-		return fmt.Errorf("write cursor hooks: %w", err)
-	}
-
-	fmt.Println("Cursor IDE hooks installed.")
-	fmt.Printf("  hook script:    %s\n", scriptPath)
-	fmt.Printf("  cursor hooks:   %s\n", cursorCfgPath)
-	fmt.Printf("  endpoint:       %s/api/v1/hooks/cursor\n", daemonAddr)
-	fmt.Println("\nReload Cursor. Agent prompts and session starts will be recorded.")
-	return nil
-}
-
-// patchCursorHooks reads (or creates) ~/.cursor/hooks.json and adds our entries.
-// Cursor hooks.json format: {"version": 1, "hooks": {"beforeSubmitPrompt": [...], ...}}
-// The "hooks" sub-object wraps all hook event arrays.
-// User hook scripts run from ~/.cursor/, so we use a relative path.
-func patchCursorHooks(cfgPath string) ([]byte, error) {
-	// Relative path from ~/.cursor/: Cursor user hooks CWD is ~/.cursor/
-	ocEntry := map[string]string{"command": "./hooks/oc-capture.sh"}
-	entryJSON, _ := json.Marshal(ocEntry)
-
-	// Parse the full file preserving unknown top-level keys.
-	topLevel := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(cfgPath); err == nil {
-		_ = json.Unmarshal(data, &topLevel)
-	}
-
-	topLevel["version"] = json.RawMessage(`1`)
-
-	// Remove any hook event keys that may have been written at the top level
-	// by older versions of the installer (events belong inside "hooks" sub-object).
-	for _, key := range []string{"beforeSubmitPrompt", "sessionStart"} {
-		delete(topLevel, key)
-	}
-
-	// Decode the "hooks" sub-object (or start fresh).
-	hooksMap := map[string]json.RawMessage{}
-	if raw, ok := topLevel["hooks"]; ok {
-		_ = json.Unmarshal(raw, &hooksMap)
-	}
-
-	for _, key := range []string{"beforeSubmitPrompt", "sessionStart"} {
-		hooksMap[key] = prependJSONEntry(hooksMap[key], entryJSON, "oc-capture")
-	}
-
-	hooksRaw, err := json.Marshal(hooksMap)
-	if err != nil {
-		return nil, err
-	}
-	topLevel["hooks"] = hooksRaw
-
-	return json.MarshalIndent(topLevel, "", "  ")
 }
 
 // ── OpenCode collector ────────────────────────────────────────────────────────
@@ -722,251 +791,17 @@ OpenCode will execute the hook script on each user message submission.
 Supports both the native opencode hook format and the Claude-compatible
 format (via opencode-claude-hooks npm package).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return installOpenCodeHooks(daemonAddr)
+			return installers.InstallOpenCode(daemonAddr)
 		},
 	}
-	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://localhost:6060", "contextd base URL")
+	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://localhost:6060", "OpenContext daemon base URL")
 	return cmd
-}
-
-func installOpenCodeHooks(daemonAddr string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	hooksDir := filepath.Join(home, ".opencontext", "collectors", "hooks")
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return err
-	}
-
-	scriptPath := filepath.Join(hooksDir, "opencode.sh")
-	script := fmt.Sprintf(`#!/usr/bin/env bash
-# OpenContext hook adapter for OpenCode — auto-generated by: oc collector opencode install
-INPUT=$(cat)
-curl -sf -X POST %s/api/v1/hooks/opencode \
-  -H "Content-Type: application/json" \
-  --data-raw "$INPUT" >/dev/null 2>&1 &
-exit 0
-`, daemonAddr)
-
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		return fmt.Errorf("write hook script: %w", err)
-	}
-
-	// OpenCode config: ~/.config/opencode/hooks.json
-	opencodeCfgDir := filepath.Join(home, ".config", "opencode")
-	if err := os.MkdirAll(opencodeCfgDir, 0o755); err != nil {
-		return err
-	}
-	opencodeCfgPath := filepath.Join(opencodeCfgDir, "hooks.json")
-	cfgJSON, err := patchOpenCodeHooks(opencodeCfgPath, scriptPath)
-	if err != nil {
-		return fmt.Errorf("patch opencode hooks: %w", err)
-	}
-	if err := os.WriteFile(opencodeCfgPath, cfgJSON, 0o644); err != nil {
-		return fmt.Errorf("write opencode hooks: %w", err)
-	}
-
-	fmt.Println("OpenCode hooks installed.")
-	fmt.Printf("  hook script:     %s\n", scriptPath)
-	fmt.Printf("  opencode hooks:  %s\n", opencodeCfgPath)
-	fmt.Printf("  endpoint:        %s/api/v1/hooks/opencode\n", daemonAddr)
-	fmt.Println("\nStart or restart OpenCode. User messages will be recorded.")
-	fmt.Println()
-	fmt.Println("Note: OpenCode hook support may vary by version.")
-	fmt.Println("If using opencode-claude-hooks npm package, you can also")
-	fmt.Println("point it at ~/.claude/settings.json (Claude hooks are compatible).")
-	return nil
-}
-
-// patchOpenCodeHooks reads (or creates) ~/.config/opencode/hooks.json.
-// OpenCode uses a Claude-compatible hook format.
-func patchOpenCodeHooks(cfgPath, scriptPath string) ([]byte, error) {
-	ocEntry := map[string]any{
-		"hooks": []map[string]string{{"type": "command", "command": scriptPath}},
-	}
-	entryJSON, _ := json.Marshal(ocEntry)
-
-	existing := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(cfgPath); err == nil {
-		_ = json.Unmarshal(data, &existing)
-	}
-
-	for _, eventName := range []string{"UserPromptSubmit", "SessionStart"} {
-		existing[eventName] = prependJSONEntry(existing[eventName], entryJSON, scriptPath)
-	}
-
-	return json.MarshalIndent(existing, "", "  ")
 }
 
 // ── shell helpers ─────────────────────────────────────────────────────────────
 
-func installShellHooks(sensitivity int) error {
-	if sensitivity < 1 || sensitivity > 2 {
-		sensitivity = 1
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	// Resolve the absolute path of the oc binary so the hook works regardless
-	// of whether oc is in PATH.
-	ocBin, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve oc binary path: %w", err)
-	}
-	// Follow symlinks so the stored path is the real binary.
-	if resolved, err := filepath.EvalSymlinks(ocBin); err == nil {
-		ocBin = resolved
-	}
-
-	hooksDir := home + "/.opencontext/collectors/shell"
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return err
-	}
-
-	zshHook := fmt.Sprintf(`# OpenContext shell hooks — installed by: oc collector shell install
-# Re-run install to update.
-# oc binary: %s  sensitivity: %d
-
-_oc_preexec() {
-  _oc_cmd_start=$(date +%%s%%3N)
-  _oc_cmd_input=$1
-}
-
-# Commands that are always skipped (matches server-side DefaultConfig filter).
-# Avoids sending an HTTP request that will be dropped immediately.
-_oc_skip_cmd() {
-  local cmd=$1
-  # Leading space = shell privacy convention
-  [[ "$cmd" == " "* ]] && return 0
-  # Extract first word (%%%% in fmt.Sprintf → %% in shell → longest-suffix strip)
-  local first="${cmd%%%% *}"
-  # Bare no-arg meta/navigation commands
-  case "$first" in
-    clear|reset|ls|ll|la|pwd|cd|history|exit)
-      [[ "$cmd" == "$first" ]] && return 0 ;;
-  esac
-  return 1
-}
-
-_oc_precmd() {
-  local _oc_exit=$?
-  local _oc_end
-  _oc_end=$(date +%%s%%3N)
-  local _oc_dur=$(( _oc_end - ${_oc_cmd_start:-$_oc_end} ))
-
-  [[ -z "$_oc_cmd_input" ]] && return 0
-  _oc_skip_cmd "$_oc_cmd_input" && { _oc_cmd_input=""; return 0; }
-
-  # &! runs in background and immediately disowns the job so zsh never
-  # prints the "[1] + done ..." completion notification.
-  %s collector shell push \
-    --command "$_oc_cmd_input" \
-    --exit-code "$_oc_exit" \
-    --duration-ms "$_oc_dur" \
-    --cwd "$PWD" \
-    --sensitivity %d &>/dev/null &!
-
-  _oc_cmd_input=""
-}
-
-autoload -Uz add-zsh-hook
-add-zsh-hook preexec _oc_preexec
-add-zsh-hook precmd _oc_precmd
-`, ocBin, sensitivity, ocBin, sensitivity)
-
-	bashHook := fmt.Sprintf(`# OpenContext shell hooks — installed by: oc collector shell install
-# oc binary: %s  sensitivity: %d
-
-_oc_preexec() {
-  _oc_cmd_start=$(date +%%s%%3N 2>/dev/null || echo 0)
-  _oc_cmd_input=$BASH_COMMAND
-}
-
-_oc_skip_cmd() {
-  local cmd=$1
-  [[ "$cmd" == " "* ]] && return 0
-  local first="${cmd%%%% *}"
-  case "$first" in
-    clear|reset|ls|ll|la|pwd|cd|history|exit)
-      [[ "$cmd" == "$first" ]] && return 0 ;;
-  esac
-  return 1
-}
-
-_oc_precmd() {
-  local _oc_exit=$?
-  local _oc_end
-  _oc_end=$(date +%%s%%3N 2>/dev/null || echo 0)
-  local _oc_dur=$(( _oc_end - ${_oc_cmd_start:-0} ))
-
-  [[ -z "$_oc_cmd_input" ]] && return 0
-  [[ "$_oc_cmd_input" == "_oc_precmd" ]] && return 0
-  _oc_skip_cmd "$_oc_cmd_input" && { _oc_cmd_input=""; return 0; }
-
-  # Wrap in subshell so bash doesn't track the job and print notifications.
-  ( %s collector shell push \
-    --command "$_oc_cmd_input" \
-    --exit-code "$_oc_exit" \
-    --duration-ms "$_oc_dur" \
-    --cwd "$PWD" \
-    --sensitivity %d &>/dev/null 2>&1 & )
-
-  _oc_cmd_input=""
-}
-
-trap '_oc_preexec "$BASH_COMMAND"' DEBUG
-PROMPT_COMMAND="_oc_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-`, ocBin, sensitivity, ocBin, sensitivity)
-
-	if err := os.WriteFile(hooksDir+"/hooks.zsh", []byte(zshHook), 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(hooksDir+"/hooks.bash", []byte(bashHook), 0o644); err != nil {
-		return err
-	}
-
-	zshrc := home + "/.zshrc"
-	bashrc := home + "/.bashrc"
-
-	sourceLine := "\n# OpenContext shell collector\nsource ~/.opencontext/collectors/shell/hooks.zsh\n"
-	appendIfMissing(zshrc, sourceLine, "hooks.zsh")
-
-	sourceLine = "\n# OpenContext shell collector\nsource ~/.opencontext/collectors/shell/hooks.bash\n"
-	appendIfMissing(bashrc, sourceLine, "hooks.bash")
-
-	sensLabel := "L2 (full command with args)"
-	if sensitivity == 1 {
-		sensLabel = "L1 (command name only)"
-	}
-
-	fmt.Println("Shell hooks installed.")
-	fmt.Printf("  sensitivity: %s\n", sensLabel)
-	fmt.Printf("  zsh:  %s/hooks.zsh  (added to ~/.zshrc)\n", hooksDir)
-	fmt.Printf("  bash: %s/hooks.bash (added to ~/.bashrc)\n", hooksDir)
-	fmt.Println("\nRestart your shell or run: source ~/.zshrc")
-	fmt.Println("To change sensitivity, re-run: oc collector shell install --sensitivity 2")
-	return nil
-}
-
-func appendIfMissing(path, content, marker string) {
-	data, _ := os.ReadFile(path)
-	if containsStr(string(data), marker) {
-		return // already installed
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = f.WriteString(content)
-}
-
 func containsStr(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub ||
-		len(s) > 0 && (s[:len(sub)] == sub || containsStr(s[1:], sub)))
+	return strings.Contains(s, sub)
 }
 
 func detectProject(cwd string) string {
@@ -1125,7 +960,7 @@ func installInjectTarget(tool, memoryPath, header, configFile string) error {
 	// Read the raw YAML so we can do a targeted append without losing formatting.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		return fmt.Errorf("read config %s: %w\n\nRun 'contextd' first to create the default config.", configFile, err)
+		return fmt.Errorf("read config %s: %w\n\nRun 'oc daemon' first to create the default config.", configFile, err)
 	}
 
 	content := string(data)
@@ -1178,7 +1013,7 @@ func installInjectTarget(tool, memoryPath, header, configFile string) error {
 	fmt.Printf("%s inject target installed.\n", tool)
 	fmt.Printf("  target file: %s\n", memoryPath)
 	fmt.Printf("  config:      %s\n", configFile)
-	fmt.Println("\nRestart contextd (or run: make restart) for changes to take effect.")
+	fmt.Println("\nRestart the OpenContext daemon (or run: make restart) for changes to take effect.")
 	fmt.Println("The memory section will be injected on the next refresh cycle.")
 	return nil
 }
@@ -1192,211 +1027,141 @@ func printJSON(v any) error {
 }
 
 func buildEventSummary(e *event.ActivityEvent) string {
-	switch e.Source {
-	case event.SourceShell:
-		cmd, _ := e.Payload["command"].(string)
-		exit := e.Labels["exit_code"]
-		proj := e.Labels["project"]
-		s := cmd
-		if proj != "" {
-			s = "[" + proj + "] " + s
-		}
-		if exit != "" && exit != "0" {
-			s += "  (exit " + exit + ")"
-		}
-		return s
-	case event.SourceGit:
-		msg, _ := e.Payload["message"].(string)
-		branch := e.Labels["branch"]
-		if msg != "" && branch != "" {
-			return branch + ": " + msg
-		}
-		return msg + branch
-	case event.SourceClaude, event.SourceCodex, event.SourceCursor, event.SourceOpenCode:
-		msg, _ := e.Payload["message"].(string)
-		proj := e.Labels["project"]
-		if msg == "" {
-			msgLen, _ := e.Payload["message_len"].(float64)
-			msg = fmt.Sprintf("(message, %d chars)", int(msgLen))
-		}
-		if len([]rune(msg)) > 60 {
-			runes := []rune(msg)
-			msg = string(runes[:57]) + "..."
-		}
-		if proj != "" {
-			return "[" + proj + "] " + msg
-		}
-		return msg
-	case event.SourceBrowser:
-		domain := e.Labels["domain"]
-		title, _ := e.Payload["title"].(string)
-		if title != "" {
-			return domain + " — " + title
-		}
-		return domain
-	case event.SourceOS:
-		switch e.Type {
-		case event.EventTypeBrowserNav:
-			url := e.Labels["url"]
-			title := e.Labels["title"]
-			appName := e.Labels["app_name"]
-			// Strip protocol for brevity
-			displayURL := url
-			for _, pfx := range []string{"https://", "http://"} {
-				if len(url) > len(pfx) && url[:len(pfx)] == pfx {
-					displayURL = url[len(pfx):]
-					break
-				}
-			}
-			if title != "" && displayURL != "" {
-				return title + "  (" + displayURL + ")"
-			}
-			if displayURL != "" {
-				return displayURL
-			}
-			if appName != "" {
-				return appName
-			}
-			return e.Labels["app"]
-		case event.EventTypeWindowFocus:
-			appName := e.Labels["app_name"]
-			title := e.Labels["title"]
-			app := e.Labels["app"]
-			url := e.Labels["url"]
-			// For browsers, show URL (stripped) instead of just window title
-			if url != "" {
-				displayURL := url
-				for _, pfx := range []string{"https://", "http://"} {
-					if len(url) > len(pfx) && url[:len(pfx)] == pfx {
-						displayURL = url[len(pfx):]
-						break
-					}
-				}
-				name := appName
-				if name == "" {
-					name = app
-				}
-				if len(displayURL) > 60 {
-					displayURL = displayURL[:57] + "..."
-				}
-				return name + " → " + displayURL
-			}
-			if appName != "" {
-				if title != "" && title != appName {
-					return appName + " — " + title
-				}
-				return appName
-			}
-			if title != "" {
-				return title
-			}
-			return app
-		case event.EventTypeUIClick:
-			controlName := e.Labels["control_name"]
-			windowTitle := e.Labels["window_title"]
-			appName := e.Labels["app_name"]
-			app := e.Labels["app"]
-			controlType := e.Labels["control_type"]
+	summary := firstEventString(e,
+		"summary",
+		"message",
+		"command",
+		"text",
+		"title",
+		"url",
+		"control_name",
+		"window_title",
+		"app_name",
+		"app",
+		"project",
+	)
+	if summary == "" {
+		summary = compactEventFields(e)
+	}
+	if summary == "" {
+		summary = fmt.Sprintf("%s.%s", e.Source, e.Type)
+	}
+	if project := e.Labels["project"]; project != "" && !strings.Contains(summary, project) {
+		summary = "[" + project + "] " + summary
+	}
+	if exit := e.Labels["exit_code"]; exit != "" && exit != "0" {
+		summary += " (exit " + exit + ")"
+	}
+	return truncateSingleLine(summary, 80)
+}
 
-			display := appName
-			if display == "" {
-				display = windowTitle
-			}
-			if display == "" {
-				display = app
-			}
-
-			if controlName != "" && controlName != "Chrome Legacy Window" {
-				if controlType != "" {
-					return controlName + " [" + controlType + "] — " + display
-				}
-				return controlName + " — " + display
-			}
-			if windowTitle != "" {
-				return windowTitle + " — " + display
-			}
-			return display
-		case event.EventTypeAppLaunch:
-			appName := e.Labels["app_name"]
-			app := e.Labels["app"]
-			if appName != "" {
-				return appName
-			}
-			return app
-		case event.EventTypeTextInput:
-			text, _ := e.Payload["text"].(string)
-			controlName := e.Labels["control_name"]
-			if len([]rune(text)) > 50 {
-				text = string([]rune(text)[:47]) + "..."
-			}
-			if controlName != "" {
-				return "[" + controlName + "] " + text
-			}
-			return text
-		case event.EventTypeClipboardCopy:
-			ct := e.Labels["content_type"]
-			appName := e.Labels["app_name"]
-			app := e.Labels["app"]
-			src := appName
-			if src == "" {
-				src = app
-			}
-			prefix := src
-			if prefix != "" {
-				prefix += ": "
-			}
-			switch ct {
-			case "image":
-				dims := e.Labels["dimensions"]
-				sizeKB, _ := e.Payload["size_kb"].(float64)
-				if dims != "" {
-					return fmt.Sprintf("%s复制图片 %s (~%dKB)", prefix, dims, int(sizeKB))
-				}
-				return prefix + "复制图片"
-			case "files":
-				count := e.Labels["file_count"]
-				files, _ := e.Payload["files"].([]interface{})
-				if len(files) == 1 {
-					name, _ := files[0].(string)
-					// Show only filename, not full path
-					for i := len(name) - 1; i >= 0; i-- {
-						if name[i] == '\\' || name[i] == '/' {
-							name = name[i+1:]
-							break
-						}
-					}
-					return prefix + "复制文件: " + name
-				}
-				return fmt.Sprintf("%s复制 %s 个文件", prefix, count)
-			default:
-				text, _ := e.Payload["text"].(string)
-				// Replace newlines for single-line display
-				for _, nl := range []string{"\r\n", "\n", "\r"} {
-					text = strings.ReplaceAll(text, nl, " ")
-				}
-				if len([]rune(text)) > 60 {
-					text = string([]rune(text)[:57]) + "..."
-				}
-				if prefix != "" {
-					return prefix + text
-				}
-				return text
-			}
-		default:
-			appName := e.Labels["app_name"]
-			if appName != "" {
-				return appName
-			}
-			app := e.Labels["app"]
-			return app
-		}
-	default:
-		// Generic: show first label value
-		for _, v := range e.Labels {
+func firstEventString(e *event.ActivityEvent, keys ...string) string {
+	for _, key := range keys {
+		if v := valueAsString(e.Payload[key]); v != "" {
 			return v
 		}
-		return string(e.Type)
+		if v := e.Labels[key]; v != "" {
+			return v
+		}
 	}
+	return ""
+}
+
+func valueAsString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case fmt.Stringer:
+		return t.String()
+	case float64:
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case bool:
+		return strconv.FormatBool(t)
+	default:
+		return ""
+	}
+}
+
+func compactEventFields(e *event.ActivityEvent) string {
+	parts := []string{}
+	for _, key := range sortedStringKeys(e.Labels) {
+		if key == "project" || key == "exit_code" {
+			continue
+		}
+		parts = append(parts, key+"="+e.Labels[key])
+		if len(parts) >= 3 {
+			return strings.Join(parts, " ")
+		}
+	}
+	payload := map[string]string{}
+	for key, val := range e.Payload {
+		if s := valueAsString(val); s != "" {
+			payload[key] = s
+		}
+	}
+	for _, key := range sortedStringKeys(payload) {
+		parts = append(parts, key+"="+payload[key])
+		if len(parts) >= 3 {
+			break
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func sortedStringKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func truncateSingleLine(s string, max int) string {
+	for _, nl := range []string{"\r\n", "\n", "\r", "\t"} {
+		s = strings.ReplaceAll(s, nl, " ")
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func withResolvedCollectorVersions(in []registry.CollectorManifest) []registry.CollectorManifest {
+	out := make([]registry.CollectorManifest, len(in))
+	copy(out, in)
+	for i := range out {
+		out[i].Version = resolveCollectorVersion(out[i].Version)
+	}
+	return out
+}
+
+func resolveCollectorVersion(v string) string {
+	if v == "bundled" {
+		return version
+	}
+	return v
+}
+
+func sortSchemas(schemas []*event.EventTypeSchema) {
+	sort.Slice(schemas, func(i, j int) bool {
+		if schemas[i].Source == schemas[j].Source {
+			return schemas[i].Type < schemas[j].Type
+		}
+		return schemas[i].Source < schemas[j].Source
+	})
 }
 
 func parseSinceDuration(s string) int64 {
@@ -1414,7 +1179,7 @@ func parseSinceDuration(s string) int64 {
 			case 'm':
 				return time.Now().Add(-time.Duration(val * float64(time.Minute))).UnixMilli()
 			case 'd':
-				return time.Now().Add(-time.Duration(val * float64(24 * time.Hour))).UnixMilli()
+				return time.Now().Add(-time.Duration(val * float64(24*time.Hour))).UnixMilli()
 			}
 		}
 	}
@@ -1442,4 +1207,46 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func printLastLines(path string, n int) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read log %s: %w", path, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	start := 0
+	if n > 0 && len(lines) > n {
+		start = len(lines) - n
+	}
+	for _, line := range lines[start:] {
+		fmt.Println(line)
+	}
+	return nil
+}
+
+func followFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			fmt.Print(line)
+		}
+		if err == io.EOF {
+			time.Sleep(300 * time.Millisecond)
+			reader.Reset(f)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
 }

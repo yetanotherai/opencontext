@@ -1,5 +1,5 @@
 // Package store defines the storage interfaces and provides a SQLite implementation.
-// All persistence in contextd goes through these interfaces; swap the implementation
+// All daemon persistence goes through these interfaces; swap the implementation
 // without touching any other package.
 package store
 

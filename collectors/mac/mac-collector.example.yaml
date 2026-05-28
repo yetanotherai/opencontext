@@ -1,8 +1,8 @@
 # macOS OpenContext Collector — example configuration
 # Copy to ~/.opencontext/mac-collector.yaml and edit as needed.
 
-# contextd endpoint (default: localhost)
-contextd_url: "http://localhost:6060"
+# OpenContext daemon endpoint (default: localhost)
+daemon_url: "http://localhost:6060"
 
 # How often to flush events (seconds)
 flush_interval: 5.0

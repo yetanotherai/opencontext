@@ -1,6 +1,6 @@
 # OpenContext macOS Collector
 
-Monitors user activity on macOS and pushes structured events to a local `contextd` daemon.
+Monitors user activity on macOS and pushes structured events to the local OpenContext daemon.
 
 ## Events captured
 
@@ -39,7 +39,7 @@ text-input capture will not work. Window focus and app launch still work without
 ## Usage
 
 ```bash
-# Start collector (pushes to contextd at localhost:6060)
+# Start collector (pushes to oc daemon at localhost:6060)
 bash run.sh
 
 # Debug mode (verbose logging)
@@ -48,7 +48,7 @@ bash run.sh --debug
 # Dry-run mode (print JSON events, don't push)
 bash run.sh --dry-run
 
-# Custom contextd URL
+# Custom OpenContext daemon URL
 bash run.sh --url http://192.168.1.10:6060
 ```
 
@@ -81,5 +81,5 @@ collector.py  ←  event Queue  ←  WindowMonitor   (NSWorkspace + AXUIElement)
                                ←  ProcessMonitor  (NSWorkspace notifications)
                                ←  ClipboardMonitor (NSPasteboard polling)
       ↓
-  ContextdClient  →  HTTP POST  →  contextd (localhost:6060)
+  ContextClient  →  HTTP POST  →  oc daemon (localhost:6060)
 ```

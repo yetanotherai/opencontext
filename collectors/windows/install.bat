@@ -41,6 +41,6 @@ echo   pythonw collector.py                -- run silently in background
 echo.
 echo Configuration: %%USERPROFILE%%\.opencontext\windows-collector.yaml
 echo.
-echo Make sure contextd is running at http://localhost:6060
+echo Make sure OpenContext daemon is running at http://localhost:6060
 echo.
 pause

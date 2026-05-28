@@ -105,7 +105,7 @@ func (s *Subscription) LLMSummarizerConfig() *summarizer.LLMConfig {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// Config is the root configuration structure for contextd.
+// Config is the root configuration structure for the OpenContext daemon.
 type Config struct {
 	DataDir        string                 `mapstructure:"data_dir"`
 	ListenAddr     string                 `mapstructure:"listen_addr"`
@@ -113,8 +113,8 @@ type Config struct {
 	MaxSensitivity event.SensitivityLevel `mapstructure:"max_sensitivity"` // global ingestion cap; 0 defaults to L2
 	// RetentionDays is the number of days to keep raw events.
 	// Events older than this are pruned daily. 0 disables pruning (default 90).
-	RetentionDays  int                    `mapstructure:"retention_days"`
-	Subscriptions  []Subscription         `mapstructure:"subscriptions"`
+	RetentionDays int            `mapstructure:"retention_days"`
+	Subscriptions []Subscription `mapstructure:"subscriptions"`
 }
 
 // DefaultConfig returns sensible defaults.

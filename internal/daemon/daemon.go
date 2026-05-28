@@ -1,11 +1,11 @@
-// contextd is the OpenContext daemon. It accepts activity events from collectors,
-// stores them in SQLite, and periodically compiles them into agent-readable memory files.
-package main
+// Package daemon runs the OpenContext local event daemon.
+package daemon
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,11 +16,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/spf13/cobra"
 
+	"github.com/yetanotherai/opencontext/internal/adapters/aihooks"
 	"github.com/yetanotherai/opencontext/internal/compiler"
 	"github.com/yetanotherai/opencontext/internal/ingester"
 	"github.com/yetanotherai/opencontext/internal/policy"
+	"github.com/yetanotherai/opencontext/internal/registry"
+	"github.com/yetanotherai/opencontext/internal/service"
 	"github.com/yetanotherai/opencontext/internal/sessionizer"
 	"github.com/yetanotherai/opencontext/internal/store"
 	"github.com/yetanotherai/opencontext/internal/subscription"
@@ -100,32 +102,28 @@ func startRawDumpScheduler(ctx context.Context, subs []subscription.Subscription
 	}
 }
 
-var (
-	cfgFile  string
-	logLevel string
-	version  = "0.1.0"
-)
-
-func main() {
-	root := &cobra.Command{
-		Use:   "contextd",
-		Short: "OpenContext daemon — memory beyond the chat",
-		RunE:  runDaemon,
-	}
-
-	root.Flags().StringVar(&cfgFile, "config", "", "config file (default: ~/.opencontext/config.yaml)")
-	root.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug|info|warn|error")
-
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
-	}
+type Options struct {
+	ConfigFile string
+	LogLevel   string
+	Version    string
 }
 
-func runDaemon(cmd *cobra.Command, args []string) error {
-	log := buildLogger(logLevel)
+func Run(opts Options) error {
+	if opts.LogLevel == "" {
+		opts.LogLevel = "info"
+	}
+	if opts.Version == "" {
+		opts.Version = "0.1.0"
+	}
+
+	log, closeLog, err := buildLogger(opts.LogLevel)
+	if err != nil {
+		return err
+	}
+	defer closeLog()
 
 	// Load configuration
-	cfg, err := subscription.Load(cfgFile)
+	cfg, err := subscription.Load(opts.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -135,7 +133,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create data dir %s: %w", cfg.DataDir, err)
 	}
 
-	log.Info("starting contextd", "version", version, "data_dir", cfg.DataDir, "addr", cfg.ListenAddr)
+	log.Info("starting opencontext daemon", "version", opts.Version, "data_dir", cfg.DataDir, "addr", cfg.ListenAddr)
 
 	// Open SQLite store
 	evStore, sessStore, err := store.OpenSQLite(cfg.DBPath())
@@ -176,15 +174,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Ingester routes
 	ing.Mount(r)
-	ing.MountClaudeHook(r)
-	ing.MountCodexHook(r)
-	ing.MountCursorHook(r)
-	ing.MountOpenCodeHook(r)
+	aihooks.Mount(r, ing.DispatchEvent)
 
 	// Query + control routes
 	r.Get("/api/v1/events", makeQueryHandler(evStore, log))
 	r.Delete("/api/v1/events", makeDeleteEventsHandler(evStore, log))
-	r.Get("/api/v1/health", makeHealthHandler(evStore, version))
+	r.Get("/api/v1/health", makeHealthHandler(evStore, opts.Version))
+	r.Get("/api/v1/collectors", makeCollectorsHandler(opts.Version))
+	r.Get("/api/v1/schemas", makeSchemasHandler())
 	r.Post("/api/v1/compile", makeCompileHandler(comp, rawDump, cfg.Subscriptions, log))
 
 	srv := &http.Server{
@@ -306,6 +303,24 @@ func makeDeleteEventsHandler(es store.EventStore, log *slog.Logger) http.Handler
 	}
 }
 
+func makeCollectorsHandler(ver string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		collectors := registry.AllCollectors()
+		for i := range collectors {
+			if collectors[i].Version == "bundled" {
+				collectors[i].Version = ver
+			}
+		}
+		writeJSON(w, http.StatusOK, collectors)
+	}
+}
+
+func makeSchemasHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, event.AllSchemas())
+	}
+}
+
 // makeCompileHandler handles POST /api/v1/compile.
 func makeCompileHandler(comp *compiler.Compiler, rawDump *compiler.RawDumpRunner, subs []subscription.Subscription, log *slog.Logger) http.HandlerFunc {
 	subMap := map[string]*subscription.Subscription{}
@@ -360,7 +375,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func buildLogger(level string) *slog.Logger {
+func buildLogger(level string) (*slog.Logger, func() error, error) {
 	var lvl slog.Level
 	switch level {
 	case "debug":
@@ -372,7 +387,23 @@ func buildLogger(level string) *slog.Logger {
 	default:
 		lvl = slog.LevelInfo
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+	writer := io.Writer(os.Stderr)
+	closeFn := func() error { return nil }
+	if logFile := os.Getenv("OC_LOG_FILE"); logFile != "" {
+		maxSize := int64(service.DefaultLogMaxSize)
+		if raw := os.Getenv("OC_LOG_MAX_SIZE"); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+				maxSize = parsed
+			}
+		}
+		w, err := service.NewRotatingWriter(logFile, maxSize)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open log file: %w", err)
+		}
+		writer = w
+		closeFn = w.Close
+	}
+	return slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: lvl})), closeFn, nil
 }
 
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {

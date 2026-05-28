@@ -1,8 +1,10 @@
-package ingester
+package aihooks
 
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -10,6 +12,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/yetanotherai/opencontext/pkg/event"
 )
+
+type DispatchFunc func(http.ResponseWriter, *event.ActivityEvent)
+
+type Adapter struct {
+	dispatch DispatchFunc
+}
+
+func Mount(r chi.Router, dispatch DispatchFunc) {
+	a := &Adapter{dispatch: dispatch}
+	r.Post("/api/v1/hooks/claude", a.handleClaudeHook)
+	r.Post("/api/v1/hooks/codex", a.handleCodexHook)
+	r.Post("/api/v1/hooks/cursor", a.handleCursorHook)
+	r.Post("/api/v1/hooks/opencode", a.handleOpenCodeHook)
+}
 
 // ── Codex CLI ─────────────────────────────────────────────────────────────────
 
@@ -27,12 +43,7 @@ type codexHookInput struct {
 	Prompt         string `json:"prompt"`
 }
 
-// MountCodexHook registers the Codex CLI hook endpoint.
-func (ing *Ingester) MountCodexHook(r chi.Router) {
-	r.Post("/api/v1/hooks/codex", ing.handleCodexHook)
-}
-
-func (ing *Ingester) handleCodexHook(w http.ResponseWriter, r *http.Request) {
+func (a *Adapter) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	var input codexHookInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -42,18 +53,18 @@ func (ing *Ingester) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	var e *event.ActivityEvent
 	switch input.HookEventName {
 	case "UserPromptSubmit":
-		e = ing.buildCodexPromptEvent(input)
+		e = buildCodexPromptEvent(input)
 	case "SessionStart":
-		e = ing.buildCodexSessionStartEvent(input)
+		e = buildCodexSessionStartEvent(input)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
 
-	ing.dispatchAIEvent(w, e)
+	a.dispatch(w, e)
 }
 
-func (ing *Ingester) buildCodexPromptEvent(input codexHookInput) *event.ActivityEvent {
+func buildCodexPromptEvent(input codexHookInput) *event.ActivityEvent {
 	msg := strings.TrimSpace(input.Prompt)
 	if len([]rune(msg)) < 5 {
 		return nil
@@ -81,7 +92,7 @@ func (ing *Ingester) buildCodexPromptEvent(input codexHookInput) *event.Activity
 	}
 }
 
-func (ing *Ingester) buildCodexSessionStartEvent(input codexHookInput) *event.ActivityEvent {
+func buildCodexSessionStartEvent(input codexHookInput) *event.ActivityEvent {
 	project := projectFromCwd(input.Cwd)
 	labels := map[string]string{"session_id": input.SessionID}
 	if project != "" {
@@ -121,12 +132,7 @@ type cursorHookInput struct {
 	Prompt         string   `json:"prompt"`
 }
 
-// MountCursorHook registers the Cursor IDE hook endpoint.
-func (ing *Ingester) MountCursorHook(r chi.Router) {
-	r.Post("/api/v1/hooks/cursor", ing.handleCursorHook)
-}
-
-func (ing *Ingester) handleCursorHook(w http.ResponseWriter, r *http.Request) {
+func (a *Adapter) handleCursorHook(w http.ResponseWriter, r *http.Request) {
 	var input cursorHookInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -136,18 +142,18 @@ func (ing *Ingester) handleCursorHook(w http.ResponseWriter, r *http.Request) {
 	var e *event.ActivityEvent
 	switch input.HookEventName {
 	case "beforeSubmitPrompt":
-		e = ing.buildCursorPromptEvent(input)
+		e = buildCursorPromptEvent(input)
 	case "sessionStart":
-		e = ing.buildCursorSessionStartEvent(input)
+		e = buildCursorSessionStartEvent(input)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
 
-	ing.dispatchAIEvent(w, e)
+	a.dispatch(w, e)
 }
 
-func (ing *Ingester) buildCursorPromptEvent(input cursorHookInput) *event.ActivityEvent {
+func buildCursorPromptEvent(input cursorHookInput) *event.ActivityEvent {
 	msg := strings.TrimSpace(input.Prompt)
 	if len([]rune(msg)) < 5 {
 		return nil
@@ -176,7 +182,7 @@ func (ing *Ingester) buildCursorPromptEvent(input cursorHookInput) *event.Activi
 	}
 }
 
-func (ing *Ingester) buildCursorSessionStartEvent(input cursorHookInput) *event.ActivityEvent {
+func buildCursorSessionStartEvent(input cursorHookInput) *event.ActivityEvent {
 	cwd := cursorWorkspaceRoot(input.WorkspaceRoots)
 	project := projectFromCwd(cwd)
 	labels := map[string]string{"conversation_id": input.ConversationID}
@@ -228,12 +234,7 @@ type openCodeHookInput struct {
 	Directory         string `json:"directory"`
 }
 
-// MountOpenCodeHook registers the OpenCode hook endpoint.
-func (ing *Ingester) MountOpenCodeHook(r chi.Router) {
-	r.Post("/api/v1/hooks/opencode", ing.handleOpenCodeHook)
-}
-
-func (ing *Ingester) handleOpenCodeHook(w http.ResponseWriter, r *http.Request) {
+func (a *Adapter) handleOpenCodeHook(w http.ResponseWriter, r *http.Request) {
 	var input openCodeHookInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -246,9 +247,9 @@ func (ing *Ingester) handleOpenCodeHook(w http.ResponseWriter, r *http.Request) 
 	if input.HookEventName != "" {
 		switch input.HookEventName {
 		case "UserPromptSubmit":
-			e = ing.buildOpenCodePromptEvent(input.SessionID, input.Cwd, input.Prompt)
+			e = buildOpenCodePromptEvent(input.SessionID, input.Cwd, input.Prompt)
 		case "SessionStart":
-			e = ing.buildOpenCodeSessionStartEvent(input.SessionID, input.Cwd)
+			e = buildOpenCodeSessionStartEvent(input.SessionID, input.Cwd)
 		default:
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 			return
@@ -261,13 +262,13 @@ func (ing *Ingester) handleOpenCodeHook(w http.ResponseWriter, r *http.Request) 
 		}
 		cwd := input.Directory
 		sessionID := input.OpenCodeSessionID
-		e = ing.buildOpenCodePromptEvent(sessionID, cwd, input.Content)
+		e = buildOpenCodePromptEvent(sessionID, cwd, input.Content)
 	}
 
-	ing.dispatchAIEvent(w, e)
+	a.dispatch(w, e)
 }
 
-func (ing *Ingester) buildOpenCodePromptEvent(sessionID, cwd, prompt string) *event.ActivityEvent {
+func buildOpenCodePromptEvent(sessionID, cwd, prompt string) *event.ActivityEvent {
 	msg := strings.TrimSpace(prompt)
 	if len([]rune(msg)) < 5 {
 		return nil
@@ -291,7 +292,7 @@ func (ing *Ingester) buildOpenCodePromptEvent(sessionID, cwd, prompt string) *ev
 	}
 }
 
-func (ing *Ingester) buildOpenCodeSessionStartEvent(sessionID, cwd string) *event.ActivityEvent {
+func buildOpenCodeSessionStartEvent(sessionID, cwd string) *event.ActivityEvent {
 	project := projectFromCwd(cwd)
 	labels := map[string]string{"session_id": sessionID}
 	if project != "" {
@@ -308,22 +309,30 @@ func (ing *Ingester) buildOpenCodeSessionStartEvent(sessionID, cwd string) *even
 	}
 }
 
-// ── shared helper ─────────────────────────────────────────────────────────────
+func projectFromCwd(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return filepath.Base(dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filepath.Base(cwd)
+}
 
-// dispatchAIEvent filters and queues an AI tool event, writing the HTTP response.
-func (ing *Ingester) dispatchAIEvent(w http.ResponseWriter, e *event.ActivityEvent) {
-	if e == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "skipped"})
-		return
-	}
-	if !ing.filter.Allow(e) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "filtered"})
-		return
-	}
-	select {
-	case ing.queue <- e:
-	default:
-		ing.log.Warn("event queue full, dropping ai hook event")
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted", "id": e.ID})
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
 }

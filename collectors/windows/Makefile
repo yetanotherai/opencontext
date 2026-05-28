@@ -94,7 +94,7 @@ status:
 	else \
 	  echo "│ not found"; \
 	fi
-	@echo "├─ contextd ───────────────────────────────────────────────"
+	@echo "├─ OpenContext daemon ─────────────────────────────────────"
 	@curl -sf $(CONTEXTD_URL)/api/v1/health 2>/dev/null \
 	  | python3 -c "import sys,json; h=json.load(sys.stdin); print('│ ok  events:', h.get('events_stored','-'))" \
 	  || echo "│ NOT reachable"

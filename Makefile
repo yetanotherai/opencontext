@@ -1,5 +1,4 @@
-BINARY_CONTEXTD := bin/contextd
-BINARY_OC       := bin/oc
+BINARY_OC := bin/oc
 
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
 LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
@@ -9,11 +8,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 # ── Build ──────────────────────────────────────────────────────────────────────
 
 .PHONY: build
-build: $(BINARY_CONTEXTD) $(BINARY_OC)
-
-$(BINARY_CONTEXTD): $(shell find cmd/contextd internal pkg -name '*.go')
-	@mkdir -p bin
-	go build $(LDFLAGS) -o $@ ./cmd/contextd
+build: $(BINARY_OC)
 
 $(BINARY_OC): $(shell find cmd/oc internal pkg -name '*.go')
 	@mkdir -p bin
@@ -21,19 +16,17 @@ $(BINARY_OC): $(shell find cmd/oc internal pkg -name '*.go')
 
 .PHONY: install
 install:
-	go install $(LDFLAGS) ./cmd/contextd ./cmd/oc
+	go install $(LDFLAGS) ./cmd/oc
 
 # ── Dev ────────────────────────────────────────────────────────────────────────
 
 .PHONY: restart
-restart: $(BINARY_CONTEXTD)
-	supervisorctl restart opencontext-contextd
-	sleep 1
-	@supervisorctl status opencontext-contextd
+restart: $(BINARY_OC)
+	./$(BINARY_OC) daemon restart
 
 .PHONY: run
-run: $(BINARY_CONTEXTD)
-	./$(BINARY_CONTEXTD) --log-level debug
+run: $(BINARY_OC)
+	./$(BINARY_OC) daemon --log-level debug
 
 .PHONY: tidy
 tidy:
@@ -69,7 +62,7 @@ clean:
 
 # ── Release ────────────────────────────────────────────────────────────────────
 
-PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
 .PHONY: release
 release:
@@ -78,10 +71,19 @@ release:
 		os=$$(echo $$platform | cut -d/ -f1); \
 		arch=$$(echo $$platform | cut -d/ -f2); \
 		echo "Building $$os/$$arch..."; \
-		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o dist/contextd-$$os-$$arch ./cmd/contextd; \
-		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o dist/oc-$$os-$$arch ./cmd/oc; \
+		ver="$(VERSION)"; case "$$ver" in v*) tag="$$ver";; *) tag="v$$ver";; esac; \
+		dist_abs=$$(pwd)/dist; \
+		tmpdir=$$(mktemp -d); \
+		bin="oc"; if [ "$$os" = "windows" ]; then bin="oc.exe"; fi; \
+		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o "$$tmpdir/$$bin" ./cmd/oc; \
+		if [ "$$os" = "windows" ]; then \
+			(cd "$$tmpdir" && zip -q "$$dist_abs/oc-$$tag-$$os-$$arch.zip" "$$bin"); \
+		else \
+			(cd "$$tmpdir" && tar czf "$$dist_abs/oc-$$tag-$$os-$$arch.tar.gz" "$$bin"); \
+		fi; \
+		rm -rf "$$tmpdir"; \
 	done
-	@echo "Binaries written to dist/"
+	@echo "Release archives written to dist/"
 
 # ── Help ───────────────────────────────────────────────────────────────────────
 
@@ -89,13 +91,13 @@ release:
 help:
 	@echo "Usage: make <target>"
 	@echo ""
-	@echo "  build         Build contextd and oc binaries to bin/"
+	@echo "  build         Build oc binary to bin/"
 	@echo "  install       Install binaries to GOPATH/bin"
-	@echo "  restart       Build and restart contextd via supervisor"
+	@echo "  restart       Build and restart installed OpenContext daemon"
 	@echo "  tidy          Run go mod tidy"
 	@echo "  test          Run all tests"
 	@echo "  vet           Run go vet"
 	@echo "  lint          Run golangci-lint (must be installed)"
 	@echo "  check         Run vet + test"
 	@echo "  clean         Remove bin/"
-	@echo "  release       Cross-compile for linux/darwin amd64/arm64"
+	@echo "  release       Cross-compile release archives"

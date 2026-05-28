@@ -1,4 +1,4 @@
-"""HTTP client for pushing ActivityEvents to contextd."""
+"""HTTP client for pushing ActivityEvents to the OpenContext daemon."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ def make_event(
     payload: dict,
     ts: Optional[int] = None,
 ) -> dict:
-    """Build a well-formed ActivityEvent dict ready to POST to contextd."""
-    # Strip empty string values — contextd rejects them
+    """Build a well-formed ActivityEvent dict ready to POST to the OpenContext daemon."""
+    # Strip empty string values — the daemon rejects them
     clean_labels = {k: v for k, v in labels.items() if v and v != ""}
     clean_payload = {k: v for k, v in payload.items() if v != "" and v is not None}
     return {
@@ -33,7 +33,7 @@ def make_event(
     }
 
 
-class ContextdClient:
+class OpenContextClient:
     def __init__(self, url: str = "http://localhost:6060"):
         self.url = url.rstrip("/")
         self._session = requests.Session()
@@ -79,3 +79,6 @@ class ContextdClient:
         except Exception as e:
             logger.debug("batch push failed: %s", e)
             return {}
+
+
+ContextdClient = OpenContextClient

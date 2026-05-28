@@ -16,10 +16,10 @@ DEFAULT_CONFIG_PATH = Path.home() / ".opencontext" / "windows-collector.yaml"
 
 @dataclass
 class Config:
-    # contextd endpoint
-    contextd_url: str = "http://localhost:6060"
+    # OpenContext daemon endpoint
+    daemon_url: str = "http://localhost:6060"
 
-    # How often to flush buffered events to contextd (seconds)
+    # How often to flush buffered events to the OpenContext daemon (seconds)
     flush_interval: float = 5.0
 
     # How often to poll the foreground window for changes (seconds)

@@ -1,4 +1,4 @@
-// Package client provides a typed HTTP client for the contextd API.
+// Package client provides a typed HTTP client for the OpenContext daemon API.
 // Collectors use this package to push events without duplicating HTTP logic.
 package client
 
@@ -16,7 +16,7 @@ import (
 
 const defaultTimeout = 3 * time.Second
 
-// Client is a typed HTTP client for the contextd daemon API.
+// Client is a typed HTTP client for the OpenContext daemon API.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -32,7 +32,7 @@ func New(baseURL string) *Client {
 	}
 }
 
-// Push sends a single event to contextd.
+// Push sends a single event to the OpenContext daemon.
 func (c *Client) Push(ctx context.Context, e *event.ActivityEvent) (*event.PushResponse, error) {
 	body, err := json.Marshal(e)
 	if err != nil {
@@ -53,9 +53,11 @@ func (c *Client) Push(ctx context.Context, e *event.ActivityEvent) (*event.PushR
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		var apiErr struct{ Error string `json:"error"` }
+		var apiErr struct {
+			Error string `json:"error"`
+		}
 		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
-		return nil, fmt.Errorf("contextd returned %d: %s", resp.StatusCode, apiErr.Error)
+		return nil, fmt.Errorf("OpenContext daemon returned %d: %s", resp.StatusCode, apiErr.Error)
 	}
 
 	var out event.PushResponse
@@ -86,9 +88,11 @@ func (c *Client) PushBatch(ctx context.Context, events []*event.ActivityEvent) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		var apiErr struct{ Error string `json:"error"` }
+		var apiErr struct {
+			Error string `json:"error"`
+		}
 		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
-		return nil, fmt.Errorf("contextd returned %d: %s", resp.StatusCode, apiErr.Error)
+		return nil, fmt.Errorf("OpenContext daemon returned %d: %s", resp.StatusCode, apiErr.Error)
 	}
 
 	var out event.BatchPushResponse
@@ -140,7 +144,7 @@ func (c *Client) QueryEvents(ctx context.Context, q *event.QueryRequest) (*event
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("contextd returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("OpenContext daemon returned %d", resp.StatusCode)
 	}
 
 	var out event.QueryResponse
@@ -168,12 +172,12 @@ func (c *Client) TriggerCompile(ctx context.Context, subscription string) error 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("contextd returned %d", resp.StatusCode)
+		return fmt.Errorf("OpenContext daemon returned %d", resp.StatusCode)
 	}
 	return nil
 }
 
-// DeleteAllEvents removes all stored events from contextd.
+// DeleteAllEvents removes all stored events from the OpenContext daemon.
 func (c *Client) DeleteAllEvents(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/api/v1/events", nil)
 	if err != nil {
@@ -187,7 +191,7 @@ func (c *Client) DeleteAllEvents(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("contextd returned %d", resp.StatusCode)
+		return fmt.Errorf("OpenContext daemon returned %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -206,7 +210,7 @@ func (c *Client) DeleteEventsBySource(ctx context.Context, source string) error 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("contextd returned %d", resp.StatusCode)
+		return fmt.Errorf("OpenContext daemon returned %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -225,7 +229,7 @@ func (c *Client) Health(ctx context.Context) (map[string]any, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("contextd returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("OpenContext daemon returned %d", resp.StatusCode)
 	}
 
 	var out map[string]any

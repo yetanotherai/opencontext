@@ -1,6 +1,6 @@
 # OpenContext — Windows UI Activity Collector
 
-监听 Windows 桌面用户行为，将结构化事件推送到 `contextd`，供 OpenContext 的 LLM 上下文引擎消费。
+监听 Windows 桌面用户行为，将结构化事件推送到本地 OpenContext daemon。
 
 ## 采集的事件
 
@@ -20,7 +20,7 @@
 
 - **Windows 10 / 11**
 - **Python 3.10+** — 从 [python.org](https://python.org) 安装，安装时勾选 "Add Python to PATH"
-- **contextd 运行中** — 监听 `http://localhost:6060`（OpenContext 主服务）
+- **OpenContext daemon 运行中** — 监听 `http://localhost:6060`
 
 ---
 
@@ -50,7 +50,7 @@ curl http://localhost:6060/api/v1/events?source=os&since=1m
 ```
 python collector.py [选项]
 
-  --url URL          contextd 地址（默认 http://localhost:6060）
+  --url URL          OpenContext daemon 地址（默认 http://localhost:6060）
   --config PATH      YAML 配置文件路径
   --dry-run          将事件打印为 JSON，不推送（调试用）
   --debug            启用详细日志
@@ -66,8 +66,8 @@ python collector.py [选项]
 配置文件位置：`%USERPROFILE%\.opencontext\windows-collector.yaml`
 
 ```yaml
-# contextd 地址
-contextd_url: http://localhost:6060
+# OpenContext daemon 地址
+daemon_url: http://localhost:6060
 
 # 事件推送间隔（秒）
 flush_interval: 5.0
@@ -125,7 +125,7 @@ collector.py (主线程，定时 flush)
                                    ↓
                               Queue（线程安全）
                                    ↓
-                    ContextdClient.push_batch() → contextd
+                    ContextClient.push_batch() → oc daemon
 ```
 
 ### 关键实现细节

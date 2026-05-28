@@ -1,5 +1,5 @@
 // Package event defines the core ActivityEvent protocol types used by all
-// collectors and contextd. It has zero external dependencies.
+// collectors and the OpenContext daemon. It has zero external dependencies.
 package event
 
 import (
@@ -38,11 +38,11 @@ const (
 	EventTypePRCreate     EventType = "pr_create"
 
 	// os
-	EventTypeWindowFocus EventType = "window_focus"
-	EventTypeAppLaunch   EventType = "app_launch"
-	EventTypeUIClick     EventType = "ui_click"
-	EventTypeTextInput   EventType = "text_input"
-	EventTypeKeyPress    EventType = "key_press"
+	EventTypeWindowFocus   EventType = "window_focus"
+	EventTypeAppLaunch     EventType = "app_launch"
+	EventTypeUIClick       EventType = "ui_click"
+	EventTypeTextInput     EventType = "text_input"
+	EventTypeKeyPress      EventType = "key_press"
 	EventTypeBrowserNav    EventType = "browser_nav"
 	EventTypeClipboardCopy EventType = "clipboard_copy"
 	EventTypeSystemIdle    EventType = "system_idle"
@@ -61,7 +61,7 @@ const (
 	EventTypeCallStart   EventType = "call_start"
 
 	// claude
-	EventTypeUserMessage EventType = "user_message"
+	EventTypeUserMessage  EventType = "user_message"
 	EventTypeSessionStart EventType = "session_start"
 )
 
@@ -92,9 +92,9 @@ const (
 // Rules:
 //   - Ts is REQUIRED and must be > 0 (Unix milliseconds when activity occurred)
 //   - Labels and Payload must not contain empty string values
-//   - ID is assigned by contextd on ingest; collectors may omit it
+//   - ID is assigned by the daemon on ingest; collectors may omit it
 type ActivityEvent struct {
-	ID          string            `json:"id"`          // UUIDv7, assigned by contextd
+	ID          string            `json:"id"`          // UUIDv7, assigned by daemon
 	Ts          int64             `json:"ts"`          // REQUIRED: Unix ms, when activity occurred
 	Source      Source            `json:"source"`      // event source family
 	Type        EventType         `json:"type"`        // specific activity type

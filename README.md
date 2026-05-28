@@ -1,189 +1,222 @@
 # OpenContext
 
-> Memory beyond the chat.
+> Local-first work memory for AI agents.
 
-OpenContext collects lightweight work signals from the tools you already use — shell, git, browser, IDE — and compresses them into a structured `memory.md` that any AI agent can read passively.
+[中文文档](README.zh-CN.md) · [Agent install guide](INSTALL.md) · [Protocol](docs/PROTOCOL.md) · [Collectors](docs/COLLECTORS.md) · [Collector architecture](docs/COLLECTOR_ARCHITECTURE.md)
 
+OpenContext watches lightweight work signals from the tools you already use, stores them locally, and turns them into a Markdown memory file that coding agents can read before they ask you to repeat context.
+
+```text
+You: "Continue the auth refactor from this morning."
+
+Without OpenContext: the agent asks what changed, which tests failed, and where to look.
+With OpenContext:    the agent can read recent commands, failed builds, commits,
+                     active project notes, and open loops from memory.md.
 ```
-You: "Help me continue working on the ingester."
 
-Without OpenContext:  Agent asks for 5 minutes of context.
-With OpenContext:     Agent already knows your last 3 failed builds,
-                      the commit you made 2 hours ago, and the open loop
-                      from yesterday's session.
-```
+## Why It Exists
+
+AI coding agents are powerful, but they start most sessions without memory of what happened outside the chat. OpenContext gives them a local activity layer:
+
+- shell commands, agent prompts, IDE hooks, and future collectors flow into one local event store
+- privacy levels decide what is recorded and what is dropped
+- subscriptions decide which projects and sources become agent-readable memory
+- `memory.md` can be referenced by Claude Code, Cursor, Hermes, OpenClaw, and other agents
 
 ## Quick Start
 
-### 1. Install
-
 ```bash
-git clone https://github.com/opencontext/opencontext
-cd opencontext
-go build -o contextd ./cmd/contextd
-go build -o oc ./cmd/oc
+npm install -g @yetanotherai/opencontext
+oc --version
+
+oc daemon
 ```
 
-### 2. Start the daemon
+In another terminal:
 
 ```bash
-contextd
-# Listening on 127.0.0.1:6060
-# Data stored in ~/.opencontext/events.db
-```
-
-### 3. Install shell hooks
-
-```bash
+oc status
 oc collector shell install
 source ~/.zshrc
 ```
-
-Every command you run is now quietly recorded. High-value signals only — no passwords, no blank commands.
-
-### 4. Configure a subscription
 
 Create `~/.opencontext/config.yaml`:
 
 ```yaml
 subscriptions:
-  - name: "my-project"
+  - name: "global"
     filter:
-      projects: ["opencontext"]
-      sources: ["shell", "git"]
+      sources: ["shell", "claude", "codex", "cursor", "opencode"]
       max_sensitivity: 2
     memory:
-      backend: "file"
-      path: "/root/code/opencontext/memory.md"
-    schedule: "*/30 * * * *"
-    # llm:                      # optional: uncomment for LLM summaries
-    #   provider: openai
-    #   model: gpt-4o-mini
-    #   api_key: sk-...
+      backend: "raw_dump"
+      path: "~/.opencontext/memory.md"
+    refresh_interval: 1800
 ```
 
-### 5. Compile memory on demand
+Compile once and point your agent at the generated memory:
 
 ```bash
-oc compile --subscription my-project
-cat /root/code/opencontext/memory.md
+oc compile --subscription global
+cat ~/.opencontext/memory.md
 ```
 
-### 6. Connect to your agent
+For a guided setup flow that an AI coding agent can follow for the user, see [INSTALL.md](INSTALL.md).
 
-In `CLAUDE.md` (or any agent config):
+To keep OpenContext running in the background:
 
-```markdown
-@memory.md
+```bash
+oc daemon install
+oc daemon status
+oc daemon logs -f
 ```
 
-That's it. The agent reads your work context every session.
-
----
+Service management uses launchd on macOS, systemd on Linux when available, and a pidfile-managed background process in WSL/container environments without systemd.
 
 ## Architecture
 
-```
-Collectors ──push──▶ contextd ──store──▶ SQLite
-                        │
-                    (on schedule)
-                        ▼
-                   Memory Compiler
-                        │
-                  ┌─────┴──────┐
-              Sessionizer   Summarizer
-              (rules-based) (LLM opt-in)
-                        │
-                        ▼
-                    memory.md ◀── Agent reads
-```
+```mermaid
+flowchart LR
+    subgraph Sources["Collectors"]
+        Shell["Shell hooks"]
+        AgentHooks["Claude / Codex / Cursor / OpenCode hooks"]
+        Future["Git / browser / IDE / OS collectors"]
+    end
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
+    Sources -->|HTTP events| Daemon["oc daemon"]
+    Daemon --> Policy["Privacy filter"]
+    Policy --> Store[("SQLite + FTS")]
+    Store --> Compiler["Memory compiler"]
+    Compiler --> Memory["memory.md"]
+    Compiler --> Inject["Injected agent memory sections"]
 
----
-
-## Event Protocol
-
-Events use a Prometheus-inspired `labels + payload` schema:
-
-```json
-{
-  "ts": 1748138400000,
-  "source": "shell",
-  "type": "command",
-  "sensitivity": 1,
-  "labels": { "app": "zsh", "project": "opencontext", "exit_code": "1" },
-  "payload": { "command": "go build ./...", "duration_ms": 423 }
-}
+    Memory --> Agents["Claude Code / Cursor / other agents"]
+    Inject --> Hermes["Hermes"]
+    Inject --> OpenClaw["OpenClaw"]
 ```
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full specification.
+## Collectors
 
----
+The default distribution keeps the core collectors inside the `oc` binary so installation is simple:
 
-## CLI
+| Source | Command | Notes |
+|---|---|---|
+| Shell | `oc collector shell install` | zsh/bash command history with privacy filtering |
+| Claude Code | `oc collector claude install` | installs Claude Code HTTP hooks |
+| Codex | `oc collector codex install` | installs Codex hook adapter |
+| Cursor | `oc collector cursor install` | installs Cursor hook adapter |
+| OpenCode | `oc collector opencode install` | installs OpenCode hook adapter |
+| macOS activity | see [Collector install guide](docs/COLLECTOR_INSTALL.md) | optional external collector, requires Accessibility permission |
+| Windows activity | see [Collector install guide](docs/COLLECTOR_INSTALL.md) | optional external collector, can run foreground or via Task Scheduler |
 
-```bash
-oc status                          # daemon health
-oc events                          # recent events (last 24h)
-oc events --source shell --since 2h --project myapp
-oc events --query "go build"       # full-text search
-oc compile                         # trigger all subscriptions
-oc compile --subscription my-project
-oc collector shell install         # install zsh/bash hooks
-```
+Run `oc collectors list` and `oc collectors info <name>` to inspect the collector manifest, version, emitted sources, install command, and schema references.
 
----
+Bundled hook collectors do not have separate source directories under `collectors/`; their install commands patch the target tool's hook configuration, and the daemon translates incoming hook payloads under `/api/v1/hooks/...`. The `collectors/` directory is reserved for collectors that run as their own process, such as shell, macOS activity, and Windows activity.
 
-## Privacy
+### Developing a Collector
 
-| Level | Default | Content |
-|-------|---------|---------|
-| L1 | ON | App name, command name, git repo, URL domain |
-| L2 | Opt-in | Full command args, commit messages, full URLs |
-| L3 | OFF | Keyboard input, full chat text, screenshots |
-
-Commands starting with a space are never recorded (standard shell convention).
-
----
-
-## Building Your Own Collector
-
-Any language. Any tool. If it can make an HTTP POST, it's a collector.
+OpenContext does not care which language a collector uses. A custom collector only needs to POST events that match the OpenContext event protocol:
 
 ```bash
 curl -X POST http://localhost:6060/api/v1/events \
   -H "Content-Type: application/json" \
   -d '{
-    "ts": 1748138400000,
-    "source": "custom-tool",
-    "type": "task_done",
+    "source": "my_tool",
+    "type": "activity",
     "sensitivity": 1,
-    "labels": {"project": "myapp"},
-    "payload": {"task": "deployed to staging"}
+    "labels": {"project": "my-project"},
+    "payload": {"summary": "something happened"}
   }'
 ```
 
-See [docs/COLLECTORS.md](docs/COLLECTORS.md) for the full guide.
+For higher throughput, send `{ "events": [...] }` to `/api/v1/events/batch`. Schemas are advisory metadata for discovery and display; ingestion must not depend on a source-specific schema. See [docs/COLLECTOR_ARCHITECTURE.md](docs/COLLECTOR_ARCHITECTURE.md) and [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
----
+## Subscriptions
 
-## Roadmap
+A subscription chooses which events become memory and where that memory is written.
 
-- [x] Shell collector + zsh/bash hooks
-- [x] SQLite storage with FTS5 full-text search
-- [x] Memory Compiler with tiered Hot/Warm/Cold memory
-- [x] LLM summarization (OpenAI, Anthropic, Ollama)
-- [x] `memory.md` file backend for passive agent consumption
-- [ ] Git collector (post-commit/post-checkout hooks)
-- [ ] OS activity tracker (window focus)
-- [ ] Browser extension
-- [ ] IDE extension (VS Code / Cursor)
-- [ ] Scheduled compilation (cron)
-- [ ] `mem0` backend for vector memory
-- [ ] Web UI for browsing events and memory
+Global memory:
 
----
+```yaml
+subscriptions:
+  - name: "global"
+    filter:
+      sources: ["shell", "claude", "codex", "cursor", "opencode"]
+      max_sensitivity: 2
+    memory:
+      backend: "raw_dump"
+      path: "~/.opencontext/memory.md"
+    refresh_interval: 1800
+```
+
+Project memory:
+
+```yaml
+subscriptions:
+  - name: "my-project"
+    filter:
+      projects: ["my-project"]
+      sources: ["shell", "claude", "codex", "cursor", "opencode"]
+      max_sensitivity: 2
+    memory:
+      backend: "raw_dump"
+      path: "/path/to/my-project/.opencontext/memory.md"
+      claude_md: "/path/to/my-project/CLAUDE.md"
+    refresh_interval: 1800
+```
+
+For Hermes or OpenClaw, add injection targets:
+
+```yaml
+memory:
+  backend: "raw_dump"
+  path: "~/.opencontext/memory.md"
+  inject_targets:
+    - path: "~/.hermes/memories/MEMORY.md"
+      header: "## OpenContext Recent Activity"
+    - path: "~/.openclaw/workspace/MEMORY.md"
+      header: "## OpenContext Recent Activity"
+```
+
+## CLI
+
+```bash
+oc daemon                          # start the local daemon
+oc daemon install                  # install as a background service
+oc daemon restart                  # restart the background service
+oc daemon logs -f                  # follow daemon logs
+oc status                          # daemon health
+oc events                          # recent events
+oc events --source shell --since 2h --project myapp
+oc events --query "go build"       # full-text search
+oc collectors list                 # list known collector integrations
+oc collectors info cursor          # show install/schema details
+oc collectors schemas              # list event schemas
+oc compile                         # trigger all subscriptions
+oc compile --subscription global
+oc collector shell install
+oc inject hermes
+oc inject openclaw
+```
+
+## Privacy
+
+| Level | Default | Content |
+|---|---:|---|
+| L1 | on | app name, command name, git repo, URL domain |
+| L2 | opt-in | full command args, commit messages, full URLs |
+| L3 | off | keyboard input, full chat text, screenshots |
+
+Commands starting with a space are never recorded by the shell collector.
+
+## Build From Source
+
+```bash
+git clone https://github.com/yetanotherai/opencontext.git
+cd opencontext
+make build
+./bin/oc --version
+```
 
 ## License
 

@@ -36,7 +36,7 @@ User: "I was working on..."           - You committed "feat: ingester" 2h ago
                           │  POST /api/v1/events  (JSON, push)
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  contextd  (local daemon, :6060)                            │
+│  oc daemon  (local daemon, :6060)                            │
 │                                                             │
 │  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐  │
 │  │  HTTP        │   │  Policy      │   │  Event Store    │  │
@@ -83,7 +83,7 @@ User: "I was working on..."           - You committed "feat: ingester" 2h ago
 2.  zsh preexec hook fires
 3.  Shell Collector calls: oc collector shell push --command "go build ./..."
 4.  oc sends: POST http://localhost:6060/api/v1/events/batch
-5.  contextd HTTP Ingester receives event, enqueues it
+5.  OpenContext HTTP Ingester receives event, enqueues it
 6.  Policy Filter checks sensitivity level, drops L3 events if not enabled
 7.  Event stored to SQLite: events table (labels + payload as JSON)
 8.  [30 min later] Memory Compiler wakes up
@@ -241,9 +241,9 @@ internal/subscription← zero business dependencies, pure config parsing
 internal/compiler    ← depends on all of the above via interfaces
 internal/ingester    ← depends on store interface only
       ↑
-cmd/contextd    ← wires all concrete implementations, dependency injection
-cmd/oc          ← CLI, calls contextd HTTP API
-collectors/shell← uses pkg/event types, calls contextd HTTP API
+cmd/oc          ← single binary: CLI plus daemon entrypoint
+internal/daemon ← wires all concrete implementations, dependency injection
+collectors/shell← uses pkg/event types, calls the daemon HTTP API
 ```
 
 ---
@@ -277,7 +277,7 @@ Privacy is a first-class concern in the protocol, not an afterthought.
 | L2 | Structured | Opt-in | Full URL, git diff summary, DOM text, message summaries |
 | L3 | Sensitive | OFF | Keyboard input, full chat content, screenshots, clipboard |
 
-Collectors label each event with the appropriate `sensitivity` value before pushing. The Policy Filter in contextd can enforce a maximum allowed level per subscription.
+Collectors label each event with the appropriate `sensitivity` value before pushing. The Policy Filter in the daemon can enforce a maximum allowed level per subscription.
 
 ---
 

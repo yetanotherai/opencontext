@@ -7,19 +7,19 @@ import (
 
 // FieldDef describes a single label or payload field for LLM context.
 type FieldDef struct {
-	Description string
-	Example     string
+	Description string `json:"description"`
+	Example     string `json:"example"`
 }
 
 // EventTypeSchema provides semantic documentation about an event type.
 // The Memory Compiler includes relevant schemas in LLM summarization prompts
 // so the model understands what each field means without guessing.
 type EventTypeSchema struct {
-	Source      Source
-	Type        EventType
-	Description string               // one-line description for LLM system prompt
-	LabelDefs   map[string]FieldDef  // documentation for each label key
-	PayloadDefs map[string]FieldDef  // documentation for each payload key
+	Source      Source              `json:"source"`
+	Type        EventType           `json:"type"`
+	Description string              `json:"description"`  // one-line description for LLM system prompt
+	LabelDefs   map[string]FieldDef `json:"label_defs"`   // documentation for each label key
+	PayloadDefs map[string]FieldDef `json:"payload_defs"` // documentation for each payload key
 }
 
 var (
@@ -85,8 +85,8 @@ func init() {
 				"project": {Description: "Last active project in this session", Example: "opencontext"},
 			},
 			PayloadDefs: map[string]FieldDef{
-				"duration_ms":    {Description: "Total session duration in milliseconds", Example: "3600000"},
-				"command_count":  {Description: "Number of commands run in this session", Example: "47"},
+				"duration_ms":   {Description: "Total session duration in milliseconds", Example: "3600000"},
+				"command_count": {Description: "Number of commands run in this session", Example: "47"},
 			},
 		},
 		{
@@ -127,8 +127,8 @@ func init() {
 				"branch": {Description: "Branch that was pushed", Example: "main"},
 			},
 			PayloadDefs: map[string]FieldDef{
-				"remote":        {Description: "Remote name", Example: "origin"},
-				"commit_count":  {Description: "Number of commits pushed", Example: "3"},
+				"remote":       {Description: "Remote name", Example: "origin"},
+				"commit_count": {Description: "Number of commits pushed", Example: "3"},
 			},
 		},
 		{
@@ -177,14 +177,14 @@ func init() {
 				"dimensions":   {Description: "Image dimensions (content_type=image only)", Example: "1920x1080"},
 			},
 			PayloadDefs: map[string]FieldDef{
-				"text":      {Description: "Copied text (up to 500 chars; head+tail preview for longer content)", Example: "func handleRequest(w http.ResponseWriter..."},
-				"text_len":  {Description: "Total character count of the original text", Example: "1420"},
-				"truncated": {Description: "True if content was cut due to length", Example: "true"},
-				"files":     {Description: "List of copied file paths (up to 20)", Example: "[\"C:\\Users\\me\\doc.pdf\"]"},
+				"text":       {Description: "Copied text (up to 500 chars; head+tail preview for longer content)", Example: "func handleRequest(w http.ResponseWriter..."},
+				"text_len":   {Description: "Total character count of the original text", Example: "1420"},
+				"truncated":  {Description: "True if content was cut due to length", Example: "true"},
+				"files":      {Description: "List of copied file paths (up to 20)", Example: "[\"C:\\Users\\me\\doc.pdf\"]"},
 				"file_count": {Description: "Total number of files copied", Example: "3"},
-				"width":     {Description: "Image width in pixels", Example: "1920"},
-				"height":    {Description: "Image height in pixels", Example: "1080"},
-				"size_kb":   {Description: "Approximate image size in KB", Example: "512"},
+				"width":      {Description: "Image width in pixels", Example: "1920"},
+				"height":     {Description: "Image height in pixels", Example: "1080"},
+				"size_kb":    {Description: "Approximate image size in KB", Example: "512"},
 			},
 		},
 		{
@@ -343,8 +343,8 @@ func init() {
 				"language": {Description: "Programming language", Example: "go"},
 			},
 			PayloadDefs: map[string]FieldDef{
-				"file":         {Description: "File path relative to project root", Example: "internal/ingester/handler.go"},
-				"line_count":   {Description: "Total lines in file after save", Example: "142"},
+				"file":       {Description: "File path relative to project root", Example: "internal/ingester/handler.go"},
+				"line_count": {Description: "Total lines in file after save", Example: "142"},
 			},
 		},
 	}

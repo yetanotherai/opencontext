@@ -1,0 +1,32 @@
+{
+  "name": "@yetanotherai/opencontext",
+  "version": "0.1.0",
+  "description": "Local-first work context daemon and CLI for AI agents",
+  "keywords": [
+    "opencontext",
+    "ai-agent",
+    "context",
+    "memory",
+    "cli"
+  ],
+  "homepage": "https://github.com/yetanotherai/opencontext",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yetanotherai/opencontext.git"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "oc": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js",
+    "README.md"
+  ]
+}

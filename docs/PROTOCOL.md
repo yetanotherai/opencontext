@@ -1,12 +1,12 @@
 # OpenContext Event Protocol
 
-> Specification for the push-based event protocol between Collectors and `contextd`.
+> Specification for the push-based event protocol between Collectors and the OpenContext daemon (`oc daemon`).
 
 ---
 
 ## 1. Overview
 
-Collectors are independent processes that observe user activity and push structured events to the `contextd` daemon via HTTP. The event schema is inspired by Prometheus labels: a small set of **mandatory base fields** plus a `labels` map for queryable dimensions and a `payload` map for LLM-consumable raw data.
+Collectors are independent processes that observe user activity and push structured events to the OpenContext daemon via HTTP. The event schema is inspired by Prometheus labels: a small set of **mandatory base fields** plus a `labels` map for queryable dimensions and a `payload` map for LLM-consumable raw data.
 
 This design ensures:
 - No empty optional fields cluttering the schema
@@ -24,7 +24,7 @@ This design ensures:
 // ActivityEvent is the canonical event structure pushed by all collectors.
 // All fields except Labels/Payload entries are mandatory.
 type ActivityEvent struct {
-    ID          string            `json:"id"`          // UUIDv7, assigned by contextd on ingest
+    ID          string            `json:"id"`          // UUIDv7, assigned by the daemon on ingest
     Ts          int64             `json:"ts"`          // REQUIRED: Unix milliseconds, must be > 0
     Source      Source            `json:"source"`      // shell | git | os | browser | ide | im
     Type        EventType         `json:"type"`        // event type within source
@@ -38,7 +38,7 @@ type ActivityEvent struct {
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `id` | assigned by contextd | Collectors may omit; server assigns UUIDv7 |
+| `id` | assigned by daemon | Collectors may omit; server assigns UUIDv7 |
 | `ts` | **REQUIRED** | Unix milliseconds from collector's system clock; missing ts = event rejected |
 | `source` | required | Must match a registered Source constant |
 | `type` | required | Must be a valid EventType for the given source |
@@ -358,7 +358,7 @@ A Collector MUST:
 2. Set `sensitivity` to the most conservative accurate level
 3. Omit any label or payload field that is empty or not applicable
 4. Use batch push (`/api/v1/events/batch`) for high-frequency events
-5. Tolerate `contextd` being unavailable (buffer locally or drop, never crash)
+5. Tolerate the daemon being unavailable (buffer locally or drop, never crash)
 6. Register a schema for any custom EventTypes it introduces via `event.RegisterSchema()`
 
 A Collector MUST NOT:

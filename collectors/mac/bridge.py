@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 bridge.py — Mac collector bridge
-Tails /tmp/oc-mac-events.jsonl and POSTs each JSON event to contextd.
-contextd must be reachable at CONTEXTD_URL (default: http://localhost:6060).
+Tails /tmp/oc-mac-events.jsonl and POSTs each JSON event to the OpenContext daemon.
+The daemon must be reachable at CONTEXTD_URL (default: http://localhost:6060).
 
-When used with the WSL2 setup, contextd is tunneled via SSH reverse-forward:
+When used with the WSL2 setup, the daemon is tunneled via SSH reverse-forward:
   WSL2> ssh -p 2222 -R 6060:127.0.0.1:6060 chicken@localhost -N &
   Mac>  python3 bridge.py
 """
@@ -77,9 +77,9 @@ def main():
 
     # Health check
     if health_check():
-        log(f"contextd OK at {CONTEXTD_URL}")
+        log(f"OpenContext daemon OK at {CONTEXTD_URL}")
     else:
-        log(f"WARNING: contextd not reachable — events will be retried each poll")
+        log(f"WARNING: OpenContext daemon not reachable — events will be retried each poll")
 
     line_num = 0
     total_pushed = 0

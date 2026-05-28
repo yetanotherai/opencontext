@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# bridge.sh — forward Windows UI collector events to local WSL2 contextd.
+# bridge.sh — forward Windows UI collector events to the local WSL2 OpenContext daemon.
 #
 # LOCAL SETUP HELPER — not part of the collector itself.
 # Bridges the gap: Windows collector writes JSON to a shared file (via /mnt/c/),
-# this script tails the file and batch-POSTs events to the WSL2 contextd daemon.
+# this script tails the file and batch-POSTs events to the WSL2 OpenContext daemon.
 #
 # Architecture:
 #   Windows: python -u collector.py --dry-run >> C:\oc-collector\events.jsonl
-#   WSL2:    bridge.sh  tail -f /mnt/c/oc-collector/events.jsonl → contextd
+#   WSL2:    bridge.sh  tail -f /mnt/c/oc-collector/events.jsonl → oc daemon
 #
 # Usage:
 #   ./bridge.sh [--events-file PATH] [--url URL]
@@ -52,7 +52,7 @@ flush_batch() {
     payload=$(printf '%s\n' "${_lines[@]}" | jq -sc '{events: .}' 2>/dev/null)
     curl -sf -X POST "$CONTEXTD_URL/api/v1/events/batch" \
       -H "Content-Type: application/json" \
-      -d "$payload" &>/dev/null && log "flushed $n events" || log "flush failed (contextd down?)"
+      -d "$payload" &>/dev/null && log "flushed $n events" || log "flush failed (OpenContext daemon down?)"
   else
     # jq not available — fall back to one-by-one
     local ok=0
@@ -73,8 +73,8 @@ until [[ -f "$EVENTS_FILE" ]]; do
 done
 
 curl -sf "$CONTEXTD_URL/api/v1/health" &>/dev/null \
-  && log "contextd OK at $CONTEXTD_URL" \
-  || log "WARNING: contextd not reachable — will retry on each flush"
+  && log "OpenContext daemon OK at $CONTEXTD_URL" \
+  || log "WARNING: OpenContext daemon not reachable — will retry on each flush"
 
 log "watching $EVENTS_FILE → $CONTEXTD_URL (poll every ${FLUSH_TIMEOUT_SECS}s, batch=$BATCH_SIZE)"
 log "note: using poll mode (inotify not supported on /mnt/c/ DrvFs)"
