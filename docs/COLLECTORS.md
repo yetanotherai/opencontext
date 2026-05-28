@@ -249,7 +249,7 @@ Register a schema for it (see [Section 9](#9-registering-an-event-schema)) so `m
 #!/usr/bin/env bash
 # Usage: oc-push-event.sh <command> <duration_ms>
 
-CONTEXTD_URL="${OPENCONTEXT_URL:-http://localhost:6060}"
+OPENCONTEXT_URL="${OPENCONTEXT_URL:-http://localhost:6060}"
 PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true)
 TS=$(date +%s%3N)
 
@@ -258,7 +258,7 @@ LABELS="{\"cwd\": \"$PWD\""
 [[ -n "$PROJECT" ]] && LABELS+=", \"project\": \"$PROJECT\""
 LABELS+="}"
 
-curl -sf -X POST "$CONTEXTD_URL/api/v1/events" \
+curl -sf -X POST "$OPENCONTEXT_URL/api/v1/events" \
   -H "Content-Type: application/json" \
   -d "{
     \"ts\": $TS,
@@ -282,7 +282,7 @@ curl -sf -X POST "$CONTEXTD_URL/api/v1/events" \
 import time
 import requests
 
-CONTEXTD_URL = "http://localhost:6060"
+OPENCONTEXT_URL = "http://localhost:6060"
 
 def push_page_visit(url: str, title: str, domain: str, duration_ms: int):
     event = {
@@ -302,7 +302,7 @@ def push_page_visit(url: str, title: str, domain: str, duration_ms: int):
 
     try:
         resp = requests.post(
-            f"{CONTEXTD_URL}/api/v1/events",
+            f"{OPENCONTEXT_URL}/api/v1/events",
             json=event,
             timeout=2,
         )
@@ -316,7 +316,7 @@ def push_batch(events: list[dict]):
     """Push multiple events at once. Prefer this over many single-event calls."""
     try:
         resp = requests.post(
-            f"{CONTEXTD_URL}/api/v1/events/batch",
+            f"{OPENCONTEXT_URL}/api/v1/events/batch",
             json={"events": events},
             timeout=5,
         )
@@ -329,7 +329,7 @@ def push_batch(events: list[dict]):
 def opencontext_running() -> bool:
     """Quick liveness check before buffering events."""
     try:
-        requests.get(f"{CONTEXTD_URL}/api/v1/health", timeout=1).raise_for_status()
+        requests.get(f"{OPENCONTEXT_URL}/api/v1/health", timeout=1).raise_for_status()
         return True
     except Exception:
         return False
@@ -341,7 +341,7 @@ def opencontext_running() -> bool:
 // opencontext-client.ts
 // Minimal TypeScript client for pushing events to the OpenContext daemon.
 
-const CONTEXTD_URL = process.env.OPENCONTEXT_URL ?? "http://localhost:6060";
+const OPENCONTEXT_URL = process.env.OPENCONTEXT_URL ?? "http://localhost:6060";
 
 interface ActivityEvent {
   ts: number;           // Unix ms
@@ -354,7 +354,7 @@ interface ActivityEvent {
 
 async function pushEvent(event: ActivityEvent): Promise<string | null> {
   try {
-    const res = await fetch(`${CONTEXTD_URL}/api/v1/events`, {
+    const res = await fetch(`${OPENCONTEXT_URL}/api/v1/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(event),
@@ -370,7 +370,7 @@ async function pushEvent(event: ActivityEvent): Promise<string | null> {
 
 async function pushBatch(events: ActivityEvent[]): Promise<void> {
   try {
-    await fetch(`${CONTEXTD_URL}/api/v1/events/batch`, {
+    await fetch(`${OPENCONTEXT_URL}/api/v1/events/batch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events }),

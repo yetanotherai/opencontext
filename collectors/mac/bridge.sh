@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bridge.sh (runs on the Mac)
 # Tails /tmp/oc-mac-events.jsonl and POSTs each JSON line to the OpenContext daemon.
-# The daemon must be reachable at CONTEXTD_URL (default: localhost:6060).
+# The daemon must be reachable at OPENCONTEXT_URL (default: localhost:6060).
 # When used with the WSL2 setup, the daemon is tunneled via SSH reverse-forward.
 #
 # Usage (run on Mac):
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 EVENTS_FILE="${EVENTS_FILE:-/tmp/oc-mac-events.jsonl}"
-CONTEXTD_URL="${CONTEXTD_URL:-http://localhost:6060}"
+DAEMON_URL="${OPENCONTEXT_URL:-http://localhost:6060}"
 POLL_SECS=5
 BATCH_SIZE=20
 LOG_TAG="[mac-bridge]"
@@ -27,7 +27,7 @@ flush_batch() {
   local payload
   if command -v jq &>/dev/null; then
     payload=$(printf '%s\n' "${_lines[@]}" | jq -sc '{events: .}' 2>/dev/null)
-    curl -sf -X POST "$CONTEXTD_URL/api/v1/events/batch" \
+    curl -sf -X POST "$DAEMON_URL/api/v1/events/batch" \
       -H "Content-Type: application/json" \
       -d "$payload" &>/dev/null \
       && log "flushed $n events" \
@@ -35,7 +35,7 @@ flush_batch() {
   else
     local ok=0
     for ln in "${_lines[@]}"; do
-      curl -sf -X POST "$CONTEXTD_URL/api/v1/events" \
+      curl -sf -X POST "$DAEMON_URL/api/v1/events" \
         -H "Content-Type: application/json" \
         -d "$ln" &>/dev/null && (( ok++ )) || true
     done
@@ -51,11 +51,11 @@ until [[ -f "$EVENTS_FILE" ]]; do
 done
 
 # Wait for OpenContext daemon
-curl -sf "$CONTEXTD_URL/api/v1/health" &>/dev/null \
-  && log "OpenContext daemon OK at $CONTEXTD_URL" \
-  || log "WARNING: OpenContext daemon not reachable at $CONTEXTD_URL — will retry"
+curl -sf "$DAEMON_URL/api/v1/health" &>/dev/null \
+  && log "OpenContext daemon OK at $DAEMON_URL" \
+  || log "WARNING: OpenContext daemon not reachable at $DAEMON_URL — will retry"
 
-log "watching $EVENTS_FILE → $CONTEXTD_URL (poll every ${POLL_SECS}s)"
+log "watching $EVENTS_FILE → $DAEMON_URL (poll every ${POLL_SECS}s)"
 
 pos=0
 declare -a buffer=()

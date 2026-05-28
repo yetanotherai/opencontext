@@ -11,7 +11,7 @@
 # ── config (override via env or make start PYTHON=...) ───────────────────────
 PYTHON      ?= C:/Users/Administrator/AppData/Local/Programs/Python/Python312/python.exe
 EVENTS_FILE ?= /mnt/c/oc-collector/events.jsonl
-CONTEXTD_URL?= http://localhost:6060
+OPENCONTEXT_URL ?= http://localhost:6060
 BRIDGE_LOG  := /tmp/oc-bridge.log
 COLLECTOR_LOG:= /mnt/c/oc-collector/collector.log
 COLLECTOR_DIR:= C:/oc-collector
@@ -59,7 +59,7 @@ start-bridge:
 	else \
 	  nohup bash $(BRIDGE) \
 	    --events-file $(EVENTS_FILE) \
-	    --url $(CONTEXTD_URL) \
+	    --url $(OPENCONTEXT_URL) \
 	    >> $(BRIDGE_LOG) 2>&1 & \
 	  sleep 1; \
 	  echo "[bridge] started (PID $$!), log → $(BRIDGE_LOG)"; \
@@ -95,7 +95,7 @@ status:
 	  echo "│ not found"; \
 	fi
 	@echo "├─ OpenContext daemon ─────────────────────────────────────"
-	@curl -sf $(CONTEXTD_URL)/api/v1/health 2>/dev/null \
+	@curl -sf $(OPENCONTEXT_URL)/api/v1/health 2>/dev/null \
 	  | python3 -c "import sys,json; h=json.load(sys.stdin); print('│ ok  events:', h.get('events_stored','-'))" \
 	  || echo "│ NOT reachable"
 	@echo "└──────────────────────────────────────────────────────────"

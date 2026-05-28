@@ -2,7 +2,7 @@
 """
 bridge.py — Mac collector bridge
 Tails /tmp/oc-mac-events.jsonl and POSTs each JSON event to the OpenContext daemon.
-The daemon must be reachable at CONTEXTD_URL (default: http://localhost:6060).
+The daemon must be reachable at OPENCONTEXT_URL (default: http://localhost:6060).
 
 When used with the WSL2 setup, the daemon is tunneled via SSH reverse-forward:
   WSL2> ssh -p 2222 -R 6060:127.0.0.1:6060 chicken@localhost -N &
@@ -17,7 +17,7 @@ import urllib.request
 import urllib.error
 
 EVENTS_FILE = os.environ.get("EVENTS_FILE", "/tmp/oc-mac-events.jsonl")
-CONTEXTD_URL = os.environ.get("CONTEXTD_URL", "http://localhost:6060")
+DAEMON_URL = os.environ.get("OPENCONTEXT_URL", "http://localhost:6060")
 POLL_SECS = float(os.environ.get("POLL_SECS", "3"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
 
@@ -29,7 +29,7 @@ def log(msg):
 def post_event(event: dict) -> bool:
     data = json.dumps(event, ensure_ascii=False).encode()
     req = urllib.request.Request(
-        f"{CONTEXTD_URL}/api/v1/events",
+        f"{DAEMON_URL}/api/v1/events",
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -45,7 +45,7 @@ def post_batch(events: list) -> int:
         return 0
     data = json.dumps({"events": events}, ensure_ascii=False).encode()
     req = urllib.request.Request(
-        f"{CONTEXTD_URL}/api/v1/events/batch",
+        f"{DAEMON_URL}/api/v1/events/batch",
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -62,13 +62,13 @@ def post_batch(events: list) -> int:
 
 def health_check() -> bool:
     try:
-        with urllib.request.urlopen(f"{CONTEXTD_URL}/api/v1/health", timeout=3) as r:
+        with urllib.request.urlopen(f"{DAEMON_URL}/api/v1/health", timeout=3) as r:
             return r.status < 300
     except Exception:
         return False
 
 def main():
-    log(f"bridge starting — {EVENTS_FILE} → {CONTEXTD_URL}")
+    log(f"bridge starting — {EVENTS_FILE} → {DAEMON_URL}")
 
     # Wait for file
     while not os.path.exists(EVENTS_FILE):
@@ -77,7 +77,7 @@ def main():
 
     # Health check
     if health_check():
-        log(f"OpenContext daemon OK at {CONTEXTD_URL}")
+        log(f"OpenContext daemon OK at {DAEMON_URL}")
     else:
         log(f"WARNING: OpenContext daemon not reachable — events will be retried each poll")
 

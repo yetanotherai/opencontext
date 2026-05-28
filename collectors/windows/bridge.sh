@@ -15,7 +15,7 @@
 set -euo pipefail
 
 EVENTS_FILE="/mnt/c/oc-collector/events.jsonl"
-CONTEXTD_URL="${OPENCONTEXT_URL:-http://localhost:6060}"
+DAEMON_URL="${OPENCONTEXT_URL:-http://localhost:6060}"
 BATCH_SIZE=20
 FLUSH_TIMEOUT_SECS=5
 PID_FILE="/tmp/oc-bridge.pid"
@@ -23,7 +23,7 @@ PID_FILE="/tmp/oc-bridge.pid"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --events-file) EVENTS_FILE="$2"; shift 2 ;;
-    --url)         CONTEXTD_URL="$2"; shift 2 ;;
+    --url)         DAEMON_URL="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -50,14 +50,14 @@ flush_batch() {
   local payload
   if command -v jq &>/dev/null; then
     payload=$(printf '%s\n' "${_lines[@]}" | jq -sc '{events: .}' 2>/dev/null)
-    curl -sf -X POST "$CONTEXTD_URL/api/v1/events/batch" \
+    curl -sf -X POST "$DAEMON_URL/api/v1/events/batch" \
       -H "Content-Type: application/json" \
       -d "$payload" &>/dev/null && log "flushed $n events" || log "flush failed (OpenContext daemon down?)"
   else
     # jq not available — fall back to one-by-one
     local ok=0
     for ln in "${_lines[@]}"; do
-      curl -sf -X POST "$CONTEXTD_URL/api/v1/events" \
+      curl -sf -X POST "$DAEMON_URL/api/v1/events" \
         -H "Content-Type: application/json" \
         -d "$ln" &>/dev/null && (( ok++ )) || true
     done
@@ -72,11 +72,11 @@ until [[ -f "$EVENTS_FILE" ]]; do
   sleep 3
 done
 
-curl -sf "$CONTEXTD_URL/api/v1/health" &>/dev/null \
-  && log "OpenContext daemon OK at $CONTEXTD_URL" \
+curl -sf "$DAEMON_URL/api/v1/health" &>/dev/null \
+  && log "OpenContext daemon OK at $DAEMON_URL" \
   || log "WARNING: OpenContext daemon not reachable — will retry on each flush"
 
-log "watching $EVENTS_FILE → $CONTEXTD_URL (poll every ${FLUSH_TIMEOUT_SECS}s, batch=$BATCH_SIZE)"
+log "watching $EVENTS_FILE → $DAEMON_URL (poll every ${FLUSH_TIMEOUT_SECS}s, batch=$BATCH_SIZE)"
 log "note: using poll mode (inotify not supported on /mnt/c/ DrvFs)"
 
 # ── main loop (poll-based, avoids inotify limitation on DrvFs) ────────────────
