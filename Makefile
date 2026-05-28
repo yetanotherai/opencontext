@@ -76,10 +76,12 @@ release:
 		tmpdir=$$(mktemp -d); \
 		bin="oc"; if [ "$$os" = "windows" ]; then bin="oc.exe"; fi; \
 		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o "$$tmpdir/$$bin" ./cmd/oc; \
+		mkdir -p "$$tmpdir/collectors/browser"; \
+		cp -R collectors/browser/chrome "$$tmpdir/collectors/browser/chrome"; \
 		if [ "$$os" = "windows" ]; then \
-			(cd "$$tmpdir" && zip -q "$$dist_abs/oc-$$tag-$$os-$$arch.zip" "$$bin"); \
+			(cd "$$tmpdir" && zip -qr "$$dist_abs/oc-$$tag-$$os-$$arch.zip" "$$bin" collectors); \
 		else \
-			(cd "$$tmpdir" && tar czf "$$dist_abs/oc-$$tag-$$os-$$arch.tar.gz" "$$bin"); \
+			(cd "$$tmpdir" && tar czf "$$dist_abs/oc-$$tag-$$os-$$arch.tar.gz" "$$bin" collectors); \
 		fi; \
 		rm -rf "$$tmpdir"; \
 	done

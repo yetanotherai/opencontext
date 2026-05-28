@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/yetanotherai/opencontext/internal/daemon"
 	"github.com/yetanotherai/opencontext/internal/installers"
@@ -26,14 +27,20 @@ import (
 )
 
 var (
-	daemonURL string
-	jsonOut   bool
-	version   = "0.1.0"
+	daemonURL    string
+	jsonOut      bool
+	outputFormat string
+	version      = "0.1.0"
 )
 
 func main() {
 	root := buildRoot()
 	if err := root.Execute(); err != nil {
+		if jsonOut || outputFormat == "json" {
+			_ = printErrorJSON(err)
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }
@@ -47,10 +54,24 @@ func buildRoot() *cobra.Command {
 
 Environment variables:
   OC_DAEMON_URL    OpenContext daemon base URL (default: http://localhost:6060)`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			switch outputFormat {
+			case "", "table":
+				return nil
+			case "json":
+				jsonOut = true
+				return nil
+			default:
+				return fmt.Errorf("invalid --format %q; use json or table", outputFormat)
+			}
+		},
 	}
 
 	root.PersistentFlags().StringVar(&daemonURL, "daemon", envOrDefault("OC_DAEMON_URL", "http://localhost:6060"), "OpenContext daemon base URL")
 	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "output as JSON")
+	root.PersistentFlags().StringVar(&outputFormat, "format", "", "output format: json|table (default: table for humans)")
 
 	root.AddCommand(
 		buildDaemonCmd(),
@@ -60,6 +81,7 @@ Environment variables:
 		buildCollectorsCmd(),
 		buildCollectorCmd(),
 		buildInjectCmd(),
+		buildSchemaCmd(root),
 	)
 
 	return root
@@ -570,6 +592,7 @@ func buildCollectorCmd() *cobra.Command {
 	collector.AddCommand(buildCodexCollectorCmd())
 	collector.AddCommand(buildCursorCollectorCmd())
 	collector.AddCommand(buildOpenCodeCollectorCmd())
+	collector.AddCommand(buildBrowserChromeCollectorCmd())
 	return collector
 }
 
@@ -798,6 +821,226 @@ format (via opencode-claude-hooks npm package).`,
 	return cmd
 }
 
+// ── Chrome browser collector ──────────────────────────────────────────────────
+
+type browserChromeInstallResult struct {
+	Status        string   `json:"status"`
+	SourcePath    string   `json:"source_path"`
+	ExtensionPath string   `json:"extension_path"`
+	DaemonURL     string   `json:"daemon_url"`
+	DryRun        bool     `json:"dry_run"`
+	NextSteps     []string `json:"next_steps"`
+}
+
+func buildBrowserChromeCollectorCmd() *cobra.Command {
+	browser := &cobra.Command{
+		Use:     "browser-chrome",
+		Aliases: []string{"chrome"},
+		Short:   "Chrome browser extension collector commands",
+		Long: `Manage the Chrome Manifest V3 browser collector.
+
+The command prepares an unpacked extension directory. Chrome still requires
+the user to load that directory from chrome://extensions because browsers do
+not allow silent installation of unpacked extensions.`,
+	}
+	browser.AddCommand(buildBrowserChromeInstallCmd())
+	return browser
+}
+
+func buildBrowserChromeInstallCmd() *cobra.Command {
+	var sourcePath string
+	var targetPath string
+	var daemonAddr string
+	var dryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Prepare the Chrome extension collector for manual loading",
+		Long: `Copies the Chrome browser collector extension to a stable OpenContext
+directory and prints the exact Chrome UI steps the user must complete.
+
+This is idempotent and safe to rerun. It does not silently change Chrome
+policy or browser profiles.`,
+		Example: `  oc collector browser-chrome install
+  oc collector browser-chrome install --json
+  oc collector browser-chrome install --source ./collectors/browser/chrome`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := installBrowserChromeCollector(sourcePath, targetPath, daemonAddr, dryRun)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return printJSON(result)
+			}
+			if result.DryRun {
+				fmt.Println("Chrome browser collector dry run.")
+			} else {
+				fmt.Println("Chrome browser collector prepared.")
+			}
+			fmt.Printf("  source:    %s\n", result.SourcePath)
+			fmt.Printf("  extension: %s\n", result.ExtensionPath)
+			fmt.Printf("  daemon:    %s\n", result.DaemonURL)
+			fmt.Println("\nAsk the user to complete these Chrome steps:")
+			for i, step := range result.NextSteps {
+				fmt.Printf("  %d. %s\n", i+1, step)
+			}
+			return nil
+		},
+	}
+
+	home, _ := os.UserHomeDir()
+	cmd.Flags().StringVar(&sourcePath, "source", "", "source extension directory (default: auto-detect collectors/browser/chrome)")
+	cmd.Flags().StringVar(&targetPath, "target", filepath.Join(home, ".opencontext", "collectors", "browser", "chrome"), "target extension directory")
+	cmd.Flags().StringVar(&daemonAddr, "daemon", "http://127.0.0.1:6060", "OpenContext daemon base URL shown in extension options")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview copy and browser steps without writing files")
+	return cmd
+}
+
+func installBrowserChromeCollector(sourcePath, targetPath, daemonAddr string, dryRun bool) (*browserChromeInstallResult, error) {
+	sourcePath = strings.TrimSpace(sourcePath)
+	targetPath = expandHome(strings.TrimSpace(targetPath))
+	if targetPath == "" {
+		return nil, fmt.Errorf("--target is required")
+	}
+	if sourcePath == "" {
+		var err error
+		sourcePath, err = findBrowserChromeSource()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		sourcePath = expandHome(sourcePath)
+	}
+	sourcePath, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source path: %w", err)
+	}
+	targetPath, err = filepath.Abs(targetPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target path: %w", err)
+	}
+	if err := validateChromeExtensionDir(sourcePath); err != nil {
+		return nil, err
+	}
+	if !dryRun {
+		if err := copyDir(sourcePath, targetPath); err != nil {
+			return nil, fmt.Errorf("copy extension files: %w", err)
+		}
+	}
+	return &browserChromeInstallResult{
+		Status:        "ready",
+		SourcePath:    sourcePath,
+		ExtensionPath: targetPath,
+		DaemonURL:     daemonAddr,
+		DryRun:        dryRun,
+		NextSteps: []string{
+			"Open chrome://extensions.",
+			"Enable Developer mode.",
+			"Click Load unpacked.",
+			"Select " + targetPath + ".",
+			"Open the OpenContext extension options and set Daemon URL to " + daemonAddr + ".",
+			"Click Send Test Event, then run: oc events --source browser --since 10m.",
+		},
+	}, nil
+}
+
+func findBrowserChromeSource() (string, error) {
+	candidates := []string{}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(wd, "collectors", "browser", "chrome"),
+			filepath.Join(wd, "..", "collectors", "browser", "chrome"),
+		)
+	}
+	if exe, err := os.Executable(); err == nil {
+		base := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(base, "collectors", "browser", "chrome"),
+			filepath.Join(base, "..", "collectors", "browser", "chrome"),
+			filepath.Join(base, "..", "..", "collectors", "browser", "chrome"),
+		)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(home, ".opencontext", "collectors", "opencontext", "collectors", "browser", "chrome"),
+		)
+	}
+	for _, candidate := range candidates {
+		if validateChromeExtensionDir(candidate) == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find collectors/browser/chrome; pass --source or clone https://github.com/yetanotherai/opencontext")
+}
+
+func validateChromeExtensionDir(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("read Chrome extension source %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("Chrome extension source is not a directory: %s", path)
+	}
+	manifest := filepath.Join(path, "manifest.json")
+	if _, err := os.Stat(manifest); err != nil {
+		return fmt.Errorf("Chrome extension source missing manifest.json at %s", manifest)
+	}
+	return nil
+}
+
+func copyDir(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !srcInfo.IsDir() {
+		return fmt.Errorf("source is not a directory: %s", src)
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := copyFile(srcPath, dstPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
+}
+
 // ── shell helpers ─────────────────────────────────────────────────────────────
 
 func containsStr(s, sub string) bool {
@@ -861,6 +1104,172 @@ func firstWord(s string) string {
 		}
 	}
 	return s
+}
+
+// ── oc schema ────────────────────────────────────────────────────────────────
+
+type commandSchema struct {
+	Command     string       `json:"command"`
+	Use         string       `json:"use"`
+	Description string       `json:"description"`
+	Aliases     []string     `json:"aliases,omitempty"`
+	Flags       []flagSchema `json:"flags,omitempty"`
+	Subcommands []string     `json:"subcommands,omitempty"`
+	Examples    []string     `json:"examples,omitempty"`
+}
+
+type flagSchema struct {
+	Name        string   `json:"name"`
+	Shorthand   string   `json:"shorthand,omitempty"`
+	Type        string   `json:"type"`
+	Default     string   `json:"default,omitempty"`
+	Description string   `json:"description"`
+	Required    bool     `json:"required"`
+	Enum        []string `json:"enum,omitempty"`
+}
+
+func buildSchemaCmd(root *cobra.Command) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "schema [command...]",
+		Short: "Print agent-readable CLI command schema",
+		Long: `Print a JSON description of the oc command tree or a single command.
+
+Agents should prefer this command over scraping help text when they need
+available subcommands, flags, defaults, value domains, and examples.`,
+		Example: `  oc schema
+  oc schema collector browser-chrome install
+  oc schema events`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := findCommandForSchema(root, args)
+			if err != nil {
+				return err
+			}
+			return printJSON(buildCommandSchema(target))
+		},
+	}
+	return cmd
+}
+
+func findCommandForSchema(root *cobra.Command, path []string) (*cobra.Command, error) {
+	current := root
+	for _, part := range path {
+		found := false
+		for _, child := range current.Commands() {
+			if child.Hidden {
+				continue
+			}
+			if child.Name() == part || containsString(child.Aliases, part) {
+				current = child
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("unknown command path %q; run: oc schema", strings.Join(path, " "))
+		}
+	}
+	return current, nil
+}
+
+func buildCommandSchema(cmd *cobra.Command) commandSchema {
+	s := commandSchema{
+		Command:     commandPath(cmd),
+		Use:         cmd.UseLine(),
+		Description: strings.TrimSpace(cmd.Short),
+		Aliases:     cmd.Aliases,
+		Flags:       collectFlagSchemas(cmd),
+		Examples:    splitExamples(cmd.Example),
+	}
+	for _, child := range cmd.Commands() {
+		if child.Hidden {
+			continue
+		}
+		s.Subcommands = append(s.Subcommands, child.Name())
+	}
+	sort.Strings(s.Subcommands)
+	return s
+}
+
+func collectFlagSchemas(cmd *cobra.Command) []flagSchema {
+	flags := []flagSchema{}
+	seen := map[string]bool{}
+	addFlagSet := func(fs *pflag.FlagSet) {
+		fs.VisitAll(func(f *pflag.Flag) {
+			if f.Hidden || seen[f.Name] {
+				return
+			}
+			seen[f.Name] = true
+			flags = append(flags, flagSchema{
+				Name:        "--" + f.Name,
+				Shorthand:   shorthandFlag(f.Shorthand),
+				Type:        f.Value.Type(),
+				Default:     f.DefValue,
+				Description: f.Usage,
+				Required:    hasAnnotation(f, cobra.BashCompOneRequiredFlag),
+				Enum:        enumFromUsage(f.Usage),
+			})
+		})
+	}
+	addFlags := func(c *cobra.Command) {
+		addFlagSet(c.Flags())
+		addFlagSet(c.PersistentFlags())
+		addFlagSet(c.InheritedFlags())
+	}
+	for c := cmd; c != nil; c = c.Parent() {
+		addFlags(c)
+	}
+	sort.Slice(flags, func(i, j int) bool { return flags[i].Name < flags[j].Name })
+	return flags
+}
+
+func commandPath(cmd *cobra.Command) string {
+	parts := []string{}
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Name() != "" {
+			parts = append(parts, c.Name())
+		}
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, " ")
+}
+
+func splitExamples(example string) []string {
+	example = strings.TrimSpace(example)
+	if example == "" {
+		return nil
+	}
+	lines := strings.Split(example, "\n")
+	out := []string{}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func shorthandFlag(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "-" + s
+}
+
+func hasAnnotation(f *pflag.Flag, key string) bool {
+	values, ok := f.Annotations[key]
+	return ok && len(values) > 0
+}
+
+func enumFromUsage(usage string) []string {
+	for _, marker := range []string{"json|table", "debug|info|warn|error"} {
+		if strings.Contains(usage, marker) {
+			return strings.Split(marker, "|")
+		}
+	}
+	return nil
 }
 
 // ── oc inject ─────────────────────────────────────────────────────────────────
@@ -1024,6 +1433,17 @@ func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+func printErrorJSON(err error) error {
+	enc := json.NewEncoder(os.Stderr)
+	enc.SetIndent("", "  ")
+	return enc.Encode(map[string]any{
+		"error":      "command_failed",
+		"message":    err.Error(),
+		"retryable":  false,
+		"suggestion": "Run `oc schema` or the command with `--help` to inspect valid arguments.",
+	})
 }
 
 func buildEventSummary(e *event.ActivityEvent) string {
@@ -1207,6 +1627,30 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func expandHome(path string) string {
+	if path == "" || path == "~" {
+		home, _ := os.UserHomeDir()
+		if path == "~" {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+	}
+	return path
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func printLastLines(path string, n int) error {

@@ -28,22 +28,34 @@ The content script never reads password fields or numeric/date/time fields. Disa
    oc daemon
    ```
 
-2. Open `chrome://extensions`.
-3. Enable Developer mode.
-4. Click "Load unpacked".
-5. Select:
+2. Prepare the unpacked extension directory:
 
-   ```text
-   collectors/browser/chrome
+   ```bash
+   oc collector browser-chrome install
    ```
 
-6. Open the extension options and verify the daemon URL:
+   If the source tree is not auto-detected, pass it explicitly:
+
+   ```bash
+   oc collector browser-chrome install --source collectors/browser/chrome
+   ```
+
+3. Open `chrome://extensions`.
+4. Enable Developer mode.
+5. Click "Load unpacked".
+6. Select the extension path printed by `oc collector browser-chrome install`. By default:
+
+   ```text
+   ~/.opencontext/collectors/browser/chrome
+   ```
+
+7. Open the extension options and verify the daemon URL:
 
    ```text
    http://127.0.0.1:6060
    ```
 
-7. Click "Send Test Event".
+8. Click "Send Test Event".
 
 Verify:
 

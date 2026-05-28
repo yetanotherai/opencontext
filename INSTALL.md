@@ -25,11 +25,11 @@ Recommended default: install only the collectors for tools the user actually use
 | Codex | `oc collector codex install` | user uses Codex CLI |
 | Cursor | `oc collector cursor install` | user uses Cursor hooks |
 | OpenCode | `oc collector opencode install` | user uses OpenCode |
-| Chrome browser | read `collectors/browser/README.md` | user wants browser page/search/form/action activity |
+| Chrome browser | `oc collector browser-chrome install` | user uses Chrome and wants browser page/search/form/action activity |
 | macOS activity | read `docs/COLLECTOR_INSTALL.md` | user wants app/window/click/text activity on macOS |
 | Windows activity | read `docs/COLLECTOR_INSTALL.md` | user wants app/window/click/text activity on Windows |
 
-The shell and agent hook collectors are bundled in `oc`. The macOS and Windows activity collectors are external collectors stored in this repo; install them only when the user explicitly chooses OS activity capture. Collectors are language-agnostic as long as they report OpenContext events.
+The shell and agent hook collectors are bundled in `oc`. The Chrome collector is a browser extension that `oc` can prepare locally, but Chrome requires the user to load the unpacked extension from `chrome://extensions`. The macOS and Windows activity collectors are external collectors stored in this repo; install them only when the user explicitly chooses OS activity capture. Collectors are language-agnostic as long as they report OpenContext events.
 
 ## Ask The User First
 
@@ -46,6 +46,42 @@ Ask these questions before changing files:
 
 4. What privacy level should be allowed?
    Recommend L2 for useful command and agent context. Use L1 for conservative metadata-only capture. Do not enable L3 unless the user explicitly asks.
+
+If the user chooses Chrome browser, also confirm:
+
+5. Is Google Chrome installed and actively used on this machine?
+   If yes, install the Chrome collector. If the user uses Edge/Firefox instead, do not silently install Chrome; explain that Chrome is the currently supported browser extension.
+
+Optional non-invasive Chrome checks:
+
+```bash
+command -v google-chrome || command -v google-chrome-stable || command -v chromium || true
+test -d "/Applications/Google Chrome.app" && echo "chrome-macos-present"
+where.exe chrome 2>/dev/null || true
+```
+
+These checks only indicate that a Chrome-like binary exists. Still ask the user whether they actually use Chrome before installing the collector.
+
+## Agent-Friendly CLI Rules
+
+`oc` is primarily intended to be used by AI agents. Prefer structured discovery and explicit flags:
+
+```bash
+oc schema --format json
+oc schema collector browser-chrome install --format json
+oc collectors list --format json
+oc collectors info browser-chrome --format json
+oc status --format json
+```
+
+Rules for agents:
+
+- Prefer `--format json` or `--json` when parsing output.
+- Use long flags only, for example `--subscription`, `--source`, `--since`, `--daemon`.
+- Before running a side-effect command, inspect it with `oc schema <command...> --format json`.
+- For commands with `--dry-run`, run the dry run first and show the user what will change.
+- Do not scrape human help text if `oc schema` can provide the command metadata.
+- Do not keep retrying an error blindly; JSON errors include a `message` and `suggestion`.
 
 ## Install `oc`
 
@@ -125,6 +161,7 @@ The agent may inspect available collectors first:
 ```bash
 oc collectors list
 oc collectors info shell
+oc collectors info browser-chrome
 oc collectors schemas
 ```
 
@@ -138,11 +175,38 @@ oc collector cursor install
 oc collector opencode install
 ```
 
-If the user selected Chrome browser, read:
+If the user selected Chrome browser and has Chrome installed, prepare the unpacked extension:
 
-```text
-collectors/browser/README.md
+```bash
+oc collector browser-chrome install --format json
 ```
+
+This copies the extension to a stable local directory and prints `extension_path` plus `next_steps`. The agent must ask the user to complete the Chrome UI steps:
+
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Click "Load unpacked".
+4. Select the printed `extension_path`.
+5. Open the OpenContext extension options and confirm the daemon URL.
+6. Click "Send Test Event".
+
+Then verify:
+
+```bash
+oc events --source browser --since 10m --format json
+```
+
+If `oc collector browser-chrome install` cannot find the extension source, clone the repo and pass `--source`:
+
+```bash
+mkdir -p ~/.opencontext/collectors
+git clone --depth 1 https://github.com/yetanotherai/opencontext.git ~/.opencontext/collectors/opencontext
+oc collector browser-chrome install \
+  --source ~/.opencontext/collectors/opencontext/collectors/browser/chrome \
+  --format json
+```
+
+For detailed browser privacy behavior, read `collectors/browser/README.md`.
 
 If the user selected macOS activity or Windows activity, stop here and read:
 
@@ -195,6 +259,7 @@ subscriptions:
 ```
 
 Remove any sources the user did not choose.
+If the user selected Chrome browser, include `"browser"` in `sources`.
 
 ### Project Subscription
 
@@ -218,6 +283,7 @@ Replace:
 - `<project-name>` with the repo/project name OpenContext records in event labels.
 - `<absolute-project-path>` with the actual project directory.
 - the source list with the user's selected collectors.
+If the user selected Chrome browser, include `"browser"` in `sources`.
 
 ## Connect Memory To Agents
 

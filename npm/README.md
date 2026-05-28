@@ -1,6 +1,6 @@
 # OpenContext npm package
 
-This package installs the `oc` binary from OpenContext GitHub Releases.
+This package installs the `oc` binary from OpenContext GitHub Releases. Release archives also include the Chrome extension collector under `collectors/browser/chrome`, so `oc collector browser-chrome install` can prepare it after npm installation.
 
 ```bash
 npm install -g @yetanotherai/opencontext
