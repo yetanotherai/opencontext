@@ -431,18 +431,7 @@ func formatEventLine(e *event.ActivityEvent, t time.Time) string {
 		}
 
 	case event.SourceBrowser:
-		domain := e.Labels["domain"]
-		title := payloadString(e.Payload, "title")
-		dur := payloadInt(e.Payload, "duration_ms")
-		durStr := ""
-		if dur > 0 {
-			durStr = fmt.Sprintf(" · %s", formatDuration(dur))
-		}
-		if title != "" {
-			detail = fmt.Sprintf("`%s` — %s%s", domain, title, durStr)
-		} else {
-			detail = fmt.Sprintf("`%s`%s", domain, durStr)
-		}
+		detail = formatBrowserEvent(e)
 
 	case event.SourceIDE:
 		file := payloadString(e.Payload, "file")
@@ -463,6 +452,52 @@ func formatEventLine(e *event.ActivityEvent, t time.Time) string {
 	}
 
 	return fmt.Sprintf("- **%s** · `%s.%s`%s · %s\n", ts, e.Source, e.Type, proj, detail)
+}
+
+func formatBrowserEvent(e *event.ActivityEvent) string {
+	domain := e.Labels["domain"]
+	title := payloadString(e.Payload, "title")
+	url := payloadString(e.Payload, "url")
+	if title == "" {
+		title = "(untitled)"
+	}
+
+	page := fmt.Sprintf("`%s` — %s", domain, title)
+	if url != "" {
+		page += fmt.Sprintf(" · %s", shortenURL(url))
+	}
+
+	switch e.Type {
+	case event.EventTypePageVisit:
+		if dur := payloadInt(e.Payload, "duration_ms"); dur > 0 {
+			return fmt.Sprintf("%s · viewed %s", page, formatDuration(dur))
+		}
+		return page
+	case event.EventTypeTabFocus:
+		return fmt.Sprintf("focused %s", page)
+	case event.EventTypeLinkClick:
+		text := payloadString(e.Payload, "text")
+		href := payloadString(e.Payload, "href")
+		return fmt.Sprintf("clicked link %q on %s%s", truncateRunes(text, 80), page, optionalArrowURL(href))
+	case event.EventTypeButtonClick:
+		text := payloadString(e.Payload, "text")
+		return fmt.Sprintf("clicked button %q on %s", truncateRunes(text, 80), page)
+	case event.EventTypeSearch:
+		text := payloadString(e.Payload, "text")
+		return fmt.Sprintf("searched %q on %s", truncateRunes(text, 100), page)
+	case event.EventTypeFormSubmit:
+		text := payloadString(e.Payload, "text")
+		return fmt.Sprintf("submitted form (%s) on %s", text, page)
+	case event.EventTypeTextInput:
+		text := payloadString(e.Payload, "text")
+		button := payloadString(e.Payload, "submit_button")
+		if button != "" {
+			return fmt.Sprintf("submitted text %q via %q on %s", truncateRunes(text, 120), button, page)
+		}
+		return fmt.Sprintf("submitted text %q on %s", truncateRunes(text, 120), page)
+	default:
+		return page
+	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -520,6 +555,36 @@ func payloadInt(payload map[string]any, key string) int64 {
 		return int64(n)
 	}
 	return 0
+}
+
+func truncateRunes(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 1 {
+		return "…"
+	}
+	return string(runes[:max-1]) + "…"
+}
+
+func shortenURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	raw = strings.TrimPrefix(raw, "https://")
+	raw = strings.TrimPrefix(raw, "http://")
+	return truncateRunes(raw, 100)
+}
+
+func optionalArrowURL(raw string) string {
+	short := shortenURL(raw)
+	if short == "" {
+		return ""
+	}
+	return " → " + short
 }
 
 func formatDuration(ms int64) string {
