@@ -10,15 +10,15 @@ It captures:
 - `browser.button_click`: explicit button clicks.
 - `browser.search`: search box submissions.
 - `browser.form_submit`: form submissions without raw field values.
-- `browser.text_input`: submitted text input content, only when enabled in options.
+- `browser.text_input`: submitted text input content from `input`, `textarea`, and `contenteditable` editors such as ChatGPT.
 
 ## Privacy Defaults
 
-Page visits, tab focus, link clicks, button clicks, form submits, and searches are enabled by default with max sensitivity L2.
+Page visits, tab focus, link clicks, button clicks, form submits, searches, and submitted text input are enabled by default with max sensitivity L2.
 
-Raw submitted text input content is disabled by default. Enable it from the extension options only when the user explicitly wants that capture.
+Submitted text input is captured only on submit intent: Enter, form submit, or clicking a send/submit/post/search button. The collector does not stream every keystroke.
 
-The content script never reads password fields or numeric/date/time fields. Ignored domains can be configured in the options page.
+The content script never reads password fields or numeric/date/time fields. Disable submitted text capture or add ignored domains in the options page for sensitive sites.
 
 ## Install Locally In Chrome
 

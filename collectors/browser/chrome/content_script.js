@@ -2,8 +2,31 @@ const MAX_TEXT_CHARS = 500;
 const SEARCH_INPUT_TYPES = new Set(["search"]);
 const TEXT_INPUT_TYPES = new Set(["text", "search", "url", "email", "tel"]);
 const SENSITIVE_INPUT_TYPES = new Set(["password", "number", "date", "datetime-local", "month", "week", "time"]);
+const SUBMIT_TEXT_PATTERN = /\b(send|submit|post|comment|ask|search)\b|发送|提交|发布|提问|搜索/i;
 
-let lastActionAt = 0;
+const lastActionAt = new Map();
+let lastEditableElement = null;
+let lastEditableAt = 0;
+
+document.addEventListener("focusin", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  const editable = editableFrom(target);
+  if (editable) {
+    lastEditableElement = editable;
+    lastEditableAt = Date.now();
+  }
+}, true);
+
+document.addEventListener("input", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  const editable = editableFrom(target);
+  if (editable) {
+    lastEditableElement = editable;
+    lastEditableAt = Date.now();
+  }
+}, true);
 
 document.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
@@ -22,6 +45,7 @@ document.addEventListener("click", (event) => {
 
   const button = target.closest("button, [role='button'], input[type='button'], input[type='submit']");
   if (button) {
+    maybeEmitSubmittedEditableText(button);
     emitAction("button_click", {
       action: "button_click",
       element: tagName(button),
@@ -64,8 +88,11 @@ document.addEventListener("submit", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.isComposing) return;
-  const input = event.target;
-  if (!isTextInput(input)) return;
+  if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+
+  const target = event.target instanceof Element ? event.target : null;
+  const input = target ? editableFrom(target) : null;
+  if (!input) return;
 
   const field = describeField(input);
   if (!field || field.textLen === 0) return;
@@ -83,27 +110,36 @@ document.addEventListener("keydown", (event) => {
 }, true);
 
 function collectTextFields(root) {
-  return [...root.querySelectorAll("input, textarea")]
+  return [...root.querySelectorAll("input, textarea, [contenteditable=''], [contenteditable='true'], [role='textbox']")]
     .map(describeField)
     .filter(Boolean)
     .filter((field) => field.textLen > 0);
 }
 
 function describeField(element) {
-  if (!isTextInput(element)) return null;
-  const text = String(element.value || "").trim();
+  const editable = editableFrom(element);
+  if (!editable) return null;
+  const text = editableText(editable);
   if (!text) return null;
-  const inputType = normalizedInputType(element);
+  const inputType = normalizedInputType(editable);
   const truncated = text.length > MAX_TEXT_CHARS;
   return {
     inputType,
-    isSearch: isSearchField(element, inputType),
-    fieldName: element.name || element.id || undefined,
-    placeholder: element.placeholder || undefined,
+    isSearch: isSearchField(editable, inputType),
+    fieldName: editable.name || editable.id || editable.getAttribute("data-testid") || undefined,
+    placeholder: editable.placeholder || editable.getAttribute("data-placeholder") || editable.getAttribute("aria-placeholder") || undefined,
     text: truncated ? `${text.slice(0, MAX_TEXT_CHARS - 1)}…` : text,
     textLen: text.length,
     truncated,
   };
+}
+
+function editableFrom(element) {
+  if (isTextInput(element)) return element;
+  const editable = element.closest("[contenteditable=''], [contenteditable='true'], [role='textbox']");
+  if (!editable) return null;
+  if (editable.closest("[aria-hidden='true'], [hidden]")) return null;
+  return editable;
 }
 
 function isTextInput(element) {
@@ -115,6 +151,9 @@ function isTextInput(element) {
 }
 
 function normalizedInputType(input) {
+  if (!(input instanceof HTMLInputElement)) {
+    return input.getAttribute("role") === "textbox" ? "textbox" : "contenteditable";
+  }
   return String(input.type || "text").toLowerCase();
 }
 
@@ -124,10 +163,54 @@ function isSearchField(input, inputType) {
   return /\b(search|query|q|keyword|keywords|搜索|查询)\b/.test(haystack);
 }
 
-function emitAction(type, payload) {
+function maybeEmitSubmittedEditableText(button) {
+  if (!looksLikeSubmitButton(button)) return;
+  if (!lastEditableElement || !document.contains(lastEditableElement)) return;
+  if (Date.now() - lastEditableAt > 10 * 60 * 1000) return;
+
+  const field = describeField(lastEditableElement);
+  if (!field || field.textLen === 0) return;
+  const type = field.isSearch ? "search" : "text_input";
+  emitAction(type, {
+    action: type,
+    element: tagName(lastEditableElement),
+    inputType: field.inputType,
+    fieldName: field.fieldName,
+    placeholder: field.placeholder,
+    text: field.text,
+    textLen: field.textLen,
+    truncated: field.truncated,
+    submitButton: shortText(button.innerText || button.getAttribute("aria-label") || button.value || button.title || ""),
+  }, { key: `${type}:${location.href}:${field.textLen}:${field.text.slice(0, 32)}` });
+}
+
+function looksLikeSubmitButton(button) {
+  if (button instanceof HTMLInputElement && button.type === "submit") return true;
+  const text = [
+    button.innerText,
+    button.getAttribute("aria-label"),
+    button.getAttribute("title"),
+    button.getAttribute("data-testid"),
+    button.id,
+    button.className,
+    button.value,
+  ].join(" ");
+  return SUBMIT_TEXT_PATTERN.test(text);
+}
+
+function editableText(element) {
+  const raw = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+    ? element.value
+    : element.innerText || element.textContent || "";
+  return String(raw || "").replace(/\s+/g, " ").trim();
+}
+
+function emitAction(type, payload, options = {}) {
   const now = Date.now();
-  if (now - lastActionAt < 250) return;
-  lastActionAt = now;
+  const key = options.key || type;
+  const previous = lastActionAt.get(key) || 0;
+  if (now - previous < 250) return;
+  lastActionAt.set(key, now);
 
   chrome.runtime.sendMessage({
     kind: "opencontext.browser_event",

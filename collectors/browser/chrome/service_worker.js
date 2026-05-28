@@ -4,7 +4,7 @@ const DEFAULT_SETTINGS = {
   capturePageVisits: true,
   captureTabFocus: true,
   captureActions: true,
-  captureInputs: false,
+  captureInputs: true,
   maxSensitivity: 2,
   minPageDurationMs: 1500,
   ignoredDomains: [],
@@ -104,6 +104,7 @@ async function handleContentEvent(message, sender) {
       form_action: message.formAction,
       field_name: message.fieldName,
       placeholder: message.placeholder,
+      submit_button: message.submitButton,
       truncated: message.truncated,
     }),
   }, settings);

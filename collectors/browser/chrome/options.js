@@ -4,7 +4,7 @@ const DEFAULT_SETTINGS = {
   capturePageVisits: true,
   captureTabFocus: true,
   captureActions: true,
-  captureInputs: false,
+  captureInputs: true,
   maxSensitivity: 2,
   ignoredDomains: [],
 };

@@ -321,7 +321,7 @@ func init() {
 		{
 			Source:      SourceBrowser,
 			Type:        EventTypeTextInput,
-			Description: "User submitted text input content in a browser page. Disabled by default in the Chrome collector.",
+			Description: "User submitted text input content in a browser page. Captured on submit intent rather than every keystroke.",
 			LabelDefs: map[string]FieldDef{
 				"browser":    {Description: "Browser name", Example: "chrome"},
 				"domain":     {Description: "Website domain", Example: "docs.google.com"},
@@ -329,13 +329,14 @@ func init() {
 				"input_type": {Description: "HTML input type", Example: "text"},
 			},
 			PayloadDefs: map[string]FieldDef{
-				"title":       {Description: "Current page title", Example: "Document"},
-				"url":         {Description: "Current page URL", Example: "https://docs.google.com/document/d/..."},
-				"text":        {Description: "Submitted text, truncated by collector", Example: "refactor authentication flow"},
-				"text_len":    {Description: "Original character count", Example: "28"},
-				"field_name":  {Description: "Input name or id", Example: "title"},
-				"placeholder": {Description: "Input placeholder", Example: "Untitled"},
-				"truncated":   {Description: "True when text was truncated", Example: "false"},
+				"title":         {Description: "Current page title", Example: "Document"},
+				"url":           {Description: "Current page URL", Example: "https://docs.google.com/document/d/..."},
+				"text":          {Description: "Submitted text, truncated by collector", Example: "refactor authentication flow"},
+				"text_len":      {Description: "Original character count", Example: "28"},
+				"field_name":    {Description: "Input name or id", Example: "title"},
+				"placeholder":   {Description: "Input placeholder", Example: "Untitled"},
+				"submit_button": {Description: "Label or accessible name of the button used to submit", Example: "Send message"},
+				"truncated":     {Description: "True when text was truncated", Example: "false"},
 			},
 		},
 		{
