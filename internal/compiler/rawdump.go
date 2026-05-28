@@ -194,9 +194,10 @@ func (r *RawDumpRunner) queryEvents(ctx context.Context, sub *subscription.Subsc
 			}
 		}
 
-		// Also query system-level events that don't have a specific project
-		// (os events, browser events, claude events from unknown projects)
-		if len(sub.Filter.Sources) == 0 || isSystemSource(event.SourceOS) {
+		// Also query system-level events — filtered by the system sources
+		// that are actually in the subscription's source list.
+		if len(sub.Filter.Sources) == 0 {
+			// No explicit sources configured — query all events (no filter)
 			evts, err := r.store.Events.Query(ctx, &event.QueryRequest{
 				Since:          since,
 				MaxSensitivity: sub.MaxSensitivity(),
@@ -206,6 +207,23 @@ func (r *RawDumpRunner) queryEvents(ctx context.Context, sub *subscription.Subsc
 				return nil, err
 			}
 			all = append(all, evts...)
+		} else if isSystemSource(event.SourceOS) {
+			// Explicit sources contain system-level ones — query each
+			for _, sysSrc := range sub.Filter.Sources {
+				if !isSystemSource(sysSrc) {
+					continue
+				}
+				evts, err := r.store.Events.Query(ctx, &event.QueryRequest{
+					Source:         sysSrc,
+					Since:          since,
+					MaxSensitivity: sub.MaxSensitivity(),
+					Limit:          limit/len(sub.Filter.Sources) + 1,
+				})
+				if err != nil {
+					return nil, err
+				}
+				all = append(all, evts...)
+			}
 		}
 
 		sort.Slice(all, func(i, j int) bool { return all[i].Ts < all[j].Ts })
